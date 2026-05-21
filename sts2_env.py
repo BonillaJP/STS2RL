@@ -51,6 +51,7 @@ for y in range(11):
 FLAT_ACTIONS.append({"action": "crystal_sphere_proceed"})
 
 ENCHANTMENT_KEYWORDS = ["adroit", "corrupted", "glam", "goopy", "imbued", "instinct", "momentum", "nimble", "perfect fit", "royally approved", "sharp", "slither", "soul's power", "sown", "swift", "vigorous"]
+OVERLAY_KEYS = ["card_select", "enchanting", "enchant", "transform", "simple_select", "choose", "upgrade_select", "remove"]
 
 class SlayTheSpire2Env(gym.Env):
     def __init__(self, port=15526, game_path=None, user_data_dir=None, force_fresh=False, is_eval=False):
@@ -246,7 +247,6 @@ class SlayTheSpire2Env(gym.Env):
         battle = state.get("battle", {})
         enemies = battle.get("enemies", [])
         
-        OVERLAY_KEYS = ["card_select", "enchanting", "enchant", "transform", "simple_select", "choose", "upgrade_select", "remove"]
         if raw_screen == "hand_select" or "hand_select" in state: screen = "hand_select"
         elif raw_screen in OVERLAY_KEYS or any(k in state for k in OVERLAY_KEYS): screen = "card_select_overlay"
         elif raw_screen == "bundle_select" or "bundle_select" in state: screen = "bundle_select"
@@ -297,15 +297,19 @@ class SlayTheSpire2Env(gym.Env):
             max_select = int(match.group(1)) if match else 1
             can_confirm = hs.get("can_confirm", False)
             
-            selected_indices = [c.get("index") for c in hs.get("selected_cards", [])]
-            if not selected_indices: selected_indices = [c.get("index") for c in hs.get("selected", [])]
-            if not selected_indices: selected_indices = [c.get("index") for c in hs.get("cards", []) if c.get("is_selected", False)]
+            raw_sel = []
+            if "selected_cards" in hs: raw_sel.extend(hs.get("selected_cards", []))
+            if "selected" in hs: raw_sel.extend(hs.get("selected", []))
+            
+            selected_indices = [str(c.get("index", c)) for c in raw_sel if c is not None]
+            if not selected_indices: 
+                selected_indices = [str(c.get("index")) for c in hs.get("cards", []) if (c.get("is_selected", False) or c.get("is_chosen", False) or c.get("selected", False) or c.get("isSelected", False) or c.get("isChosen", False))]
             
             effectively_selected = len(selected_indices)
             if can_confirm and max_select == 1: effectively_selected = 1
             
             if effectively_selected < max_select:
-                selectable = [c.get("index") for c in hs.get("cards", []) if c.get("index") not in selected_indices]
+                selectable = [c.get("index") for c in hs.get("cards", []) if str(c.get("index")) not in selected_indices]
                 set_mask(81, 10, selectable)
             if can_confirm: mask[91] = True
         elif screen == "rewards":
@@ -344,20 +348,21 @@ class SlayTheSpire2Env(gym.Env):
             max_sel = int(match.group(1)) if match else 1
             
             # --- ADAPTIVE SELECTION LIMIT ---
-            selected_indices = [c.get("index") for c in cs.get("selected_cards", [])]
-            if not selected_indices: selected_indices = [c.get("index") for c in cs.get("selected", [])]
-            if not selected_indices: selected_indices = [c.get("index") for c in cs.get("selected_card_indices", [])]
-            if not selected_indices: selected_indices = [c.get("index") for c in cs.get("cards", []) if (c.get("is_selected", False) or c.get("is_chosen", False) or c.get("selected", False))]
+            raw_sel = []
+            if "selected_cards" in cs: raw_sel.extend(cs.get("selected_cards", []))
+            if "selected" in cs: raw_sel.extend(cs.get("selected", []))
+            if "selected_card_indices" in cs: raw_sel.extend([{"index": i} for i in cs.get("selected_card_indices", [])])
+            
+            selected_indices = [str(c.get("index", c)) for c in raw_sel if c is not None]
+            
+            if not selected_indices: 
+                selected_indices = [str(c.get("index")) for c in cs.get("cards", []) if (c.get("is_selected", False) or c.get("is_chosen", False) or c.get("selected", False) or c.get("isSelected", False) or c.get("isChosen", False))]
             
             can_confirm = cs.get("can_confirm", False)
             if not can_confirm:
-                valid_grid_indices = [c.get("index") for c in cs.get("cards", []) if c.get("index") not in selected_indices]
-                if cs.get("screen_type") == "choose":
-                    if len(selected_indices) < max_sel:
-                        set_mask(160, 25, valid_grid_indices)
-                else:
-                    if len(selected_indices) < max_sel:
-                        set_mask(160, 25, valid_grid_indices)
+                valid_grid_indices = [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in selected_indices]
+                if len(selected_indices) < max_sel:
+                    set_mask(160, 25, valid_grid_indices)
             
             is_mid_selection = (can_confirm or len(selected_indices) > 0)
             proceed_exhausted = self.state_action_counts.get(123, 0) >= 10
@@ -543,7 +548,7 @@ class SlayTheSpire2Env(gym.Env):
         elif st_type=="treasure": relics=state.get("treasure", {}).get("relics", [])
         for i, relic in enumerate(relics[:20]):
             base = 770 + (i * 5)
-            obs[base], obs[base+1] = stable_hash(relic.get("id") or relic.get("relic_id"))/10000.0, (relic.get("counter")/10.0) if relic.counter is not None else 0.0
+            obs[base], obs[base+1] = stable_hash(relic.get("id") or relic.get("relic_id"))/10000.0, (relic.get("counter")/10.0) if relic.get("counter") is not None else 0.0
         for i, node in enumerate(state.get("map", {}).get("nodes", [])[:50]):
             base = 870 + (i * 10)
             if base+2 < 1536: obs[base], obs[base+1], obs[base+2] = node.get("col", 0)/7.0, node.get("row", 0)/15.0, stable_hash(node.get("type"))/10000.0
@@ -600,7 +605,6 @@ class SlayTheSpire2Env(gym.Env):
         
         payload = FLAT_ACTIONS[int(action_idx)].copy()
         raw_screen = self.current_state.get("state_type", "unknown")
-        OVERLAY_KEYS = ["card_select", "enchanting", "enchant", "transform", "simple_select", "choose", "upgrade_select", "remove"]
         if raw_screen == "hand_select" or "hand_select" in self.current_state: screen = "hand_select"
         elif raw_screen in OVERLAY_KEYS or any(k in self.current_state for k in OVERLAY_KEYS): screen = "card_select_overlay"
         elif raw_screen == "bundle_select" or "bundle_select" in self.current_state: screen = "bundle_select"

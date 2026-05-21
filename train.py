@@ -117,19 +117,30 @@ class GlobalPerformanceTracker:
             with open(PERF_STATE_FILE, "w") as f: json.dump({"best_reward": float(self.best_reward), "best_floor": int(self.best_floor), "hof_entries": self.hof_entries}, f)
         except: pass
 
-def synchronize_logs(current_step):
-    """Truncates log files to ensure they don't contain 'future' data after a resume/crash."""
+def synchronize_logs(current_step, checkpoint_path=None):
+    """Merges fragmented logs and truncates ghost steps to ensure 100% data integrity."""
     print(f"[INTEGRITY] Synchronizing logs with current brain step: {current_step:,}...")
     
-    # Files to synchronize
-    log_files = {
-        "progress.csv": "timesteps",
-        "exam_progression_log.csv": "step"
-    }
-    
-    for filename, step_col in log_files.items():
-        path = os.path.join(LOG_DIR, filename)
-        if os.path.exists(path):
+    # 1. Rewind Technical SB3/TensorBoard Logs
+    tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint_time = os.path.getmtime(checkpoint_path)
+        tech_files = glob.glob(os.path.join(tech_log_dir, "*"))
+        purged_count = 0
+        for path in tech_files:
+            # Delete any technical log file created AFTER the checkpoint was saved
+            if os.path.getmtime(path) > checkpoint_time:
+                try:
+                    os.remove(path)
+                    purged_count += 1
+                except: pass
+        if purged_count > 0:
+            print(f"  > sb3_tech: Purged {purged_count} future/ghost session files.")
+
+    # 2. Sync Technical CSVs
+    log_files = {os.path.join(tech_log_dir, "progress.csv"): "timesteps", "exam_progression_log.csv": "step"}
+    for path, step_col in log_files.items():
+        if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
                 df = pd.read_csv(path)
                 if step_col in df.columns:
@@ -137,11 +148,77 @@ def synchronize_logs(current_step):
                     df = df[df[step_col] <= current_step]
                     if len(df) < original_len:
                         df.to_csv(path, index=False)
-                        print(f"  > {filename}: Truncated {original_len - len(df)} rows to align with step {current_step}")
-                    else:
-                        print(f"  > {filename}: Integrity verified.")
-            except Exception as e:
-                print(f"  > [ERROR] Failed to sync {filename}: {e}")
+                        print(f"  > {os.path.basename(path)}: Truncated {original_len - len(df)} rows.")
+            except: pass
+
+    # 3. Consolidated Master Log Sync (Node Monitors)
+    target_node_steps = current_step // len(TRAIN_PORTS)
+    for port in TRAIN_PORTS + [EVAL_PORT]:
+        # Gather ALL fragments for this node (handles double extensions .csv.monitor.csv)
+        fragments = glob.glob(os.path.join(LOG_DIR, f"*monitor*{port}*"))
+        master_path = os.path.join(LOG_DIR, f"monitor_{port}_master.csv")
+        
+        if not fragments: continue
+        
+        combined_data = []
+        header_to_keep = f'#{{ "t_start": {time.time()}, "env_id": "None" }}\n' # Fallback header
+        
+        for f_path in fragments:
+            if "master" in f_path: continue # Don't re-merge the master into itself
+            try:
+                with open(f_path, 'r') as f:
+                    line = f.readline()
+                    if line.startswith("#"): header_to_keep = line
+                    df = pd.read_csv(f)
+                    if not df.empty: combined_data.append(df)
+            except: pass
+            
+        # Add existing master data if it exists
+        if os.path.exists(master_path):
+            try:
+                with open(master_path, 'r') as f:
+                    f.readline() # skip header
+                    df = pd.read_csv(f)
+                    if not df.empty: combined_data.insert(0, df)
+            except: pass
+
+        if combined_data:
+            # Merge and sort by time 't'
+            master_df = pd.concat(combined_data, ignore_index=True).sort_values(by='t').drop_duplicates()
+            
+            # TRUNCATE GHOST RUNS (Only for training nodes)
+            if port in TRAIN_PORTS:
+                master_df['cumsum_l'] = master_df['l'].cumsum()
+                original_len = len(master_df)
+                master_df = master_df[master_df['cumsum_l'] <= target_node_steps]
+                cleaned_count = original_len - len(master_df)
+                master_df = master_df.drop(columns=['cumsum_l'])
+            else:
+                cleaned_count = 0
+
+            # Write single Master File
+            with open(master_path, 'w', newline='') as f:
+                f.write(header_to_keep)
+                master_df.to_csv(f, index=False)
+            
+            # Physical Cleanup: Delete all fragments (they are now in master)
+            for f_path in fragments:
+                if "master" not in f_path:
+                    try: os.remove(f_path)
+                    except: pass
+            
+            status = f"Merged {len(combined_data)} runs"
+            if cleaned_count > 0: status += f" and cleaned {cleaned_count} ghost runs"
+            print(f"  > Port {port}: {status}. Master log established.")
+
+    # 4. Final Clutter Vacuum
+    all_junk = glob.glob(os.path.join(LOG_DIR, "*tfevents*")) + glob.glob(os.path.join(LOG_DIR, "*monitor*"))
+    for path in all_junk:
+        if "master" in path or os.path.isdir(path): continue
+        try:
+            if os.path.getsize(path) < 150:
+                os.remove(path)
+        except: pass
 
 class TensorboardMetricsCallback(BaseCallback):
     def __init__(self, tracker, verbose=0):
@@ -308,7 +385,7 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Mastery Thresholds (RECALIBRATED FOR MASTER CLASS 2.0)
+        # Mastery Thresholds
         promo_reward_targets = {1: 15.0, 2: 40.0, 3: 80.0}
         promo_floor_targets = {1: 12.0, 2: 28.0, 3: 45.0}
         exam_win_floors = {1: 17, 2: 34, 3: 51, 4: 51}
@@ -493,23 +570,27 @@ class PhaseManagerCallback(BaseCallback):
 
 def get_newest_model_and_vec():
     all_zips = []
+    # Exhaustive search: find the absolute newest zip in any model or checkpoint folder
     for root, _, files in os.walk(MODEL_DIR):
         for f in files:
-            if f.endswith(".zip"): all_zips.append(os.path.join(root, f))
+            if f.endswith(".zip"):
+                all_zips.append(os.path.join(root, f))
     for root, _, files in os.walk(CHECKPOINT_DIR):
         for f in files:
-            if f.endswith(".zip"): all_zips.append(os.path.join(root, f))
+            if f.endswith(".zip"):
+                all_zips.append(os.path.join(root, f))
+    
     if not all_zips: return None, None
     
     latest_model = max(all_zips, key=os.path.getmtime)
-    print(f"[SWEEPER] Resuming from newest file: {latest_model}")
+    print(f"[SWEEPER] Resuming from absolute newest file: {latest_model}")
     
     # Standardized Partner Logic: Check for a .pkl with the exact same name
     vec_path = latest_model.replace(".zip", ".pkl")
     if os.path.exists(vec_path):
         return latest_model, vec_path
     
-    # Legacy/Fallback Logic
+    # Fallback model loading logic
     print(f"[SWEEPER] Warning: Exact partner .pkl not found. Checking for emergency/best defaults...")
     dirname = os.path.dirname(latest_model)
     emergency_pkl = os.path.join(dirname, "sts2_emergency_save.pkl")
@@ -572,12 +653,28 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
 
 def main():
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
-    new_logger = configure(LOG_DIR, ["stdout", "csv", "tensorboard"])
+    tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
+    os.makedirs(tech_log_dir, exist_ok=True)
+    new_logger = configure(tech_log_dir, ["stdout", "csv", "tensorboard"])
     current_model_file, latest_vec_path = get_newest_model_and_vec()
     train_env = setup_vec_env(ports=TRAIN_PORTS, vec_path=latest_vec_path, is_eval=False)
     eval_env = setup_vec_env(ports=[EVAL_PORT], vec_path=latest_vec_path, is_eval=True)
     tracker = GlobalPerformanceTracker()
     metrics_cb = TensorboardMetricsCallback(tracker)
+    # Determine the correct starting stage parameters if resuming
+    start_n_steps, start_batch_size = BUFFER_STAGES[0][0], BUFFER_STAGES[0][1]
+    if current_model_file:
+        try:
+            # Peak inside the zip to find the internal step count
+            temp_model = MaskablePPO.load(current_model_file)
+            current_steps = temp_model.num_timesteps
+            del temp_model
+            for n_steps, batch_size, stage_end in BUFFER_STAGES:
+                if current_steps < stage_end:
+                    start_n_steps, start_batch_size = n_steps, batch_size
+                    break
+        except: pass
+
     model = None
     try:
         for n_steps, batch_size, stage_end in BUFFER_STAGES:
@@ -588,9 +685,16 @@ def main():
             phase_cb = PhaseManagerCallback(eval_env, eval_freq_global, tracker, n_eval_episodes=10)
             
             if model is None: 
-                model = create_fresh_model(train_env, n_steps, batch_size, current_model_file)
+                # Use the pre-determined steps to avoid a double-load/transition
+                model = create_fresh_model(train_env, start_n_steps, start_batch_size, current_model_file)
                 synchronize_logs(model.num_timesteps)
-            elif model.n_steps != n_steps:
+            
+            # If the loaded model's steps are beyond this stage, skip it
+            if model.num_timesteps >= stage_end: 
+                continue
+
+            # If the current stage requires a different buffer size than what's loaded
+            if model.n_steps != n_steps:
                 tmp_path = os.path.join(CHECKPOINT_DIR, "transition_temp.zip")
                 tmp_vec = os.path.join(CHECKPOINT_DIR, "transition_temp.pkl")
                 model.save(tmp_path)
@@ -599,8 +703,13 @@ def main():
                 model = create_fresh_model(train_env, n_steps, batch_size, tmp_path)
                 model.set_logger(new_logger)
                 synchronize_logs(model.num_timesteps)
-
-            if model.num_timesteps >= stage_end: continue
+                
+                # Cleanup handoff files once successfully loaded into the new brain
+                try:
+                    if os.path.exists(tmp_path): os.remove(tmp_path)
+                    if os.path.exists(tmp_vec): os.remove(tmp_vec)
+                    print(f"[SYSTEM] Stage Handoff Successful. Transition files purged.")
+                except: pass
             
             # THE CRITICAL TRAINING LOOP
             model.learn(
@@ -630,6 +739,4 @@ def main():
         except: pass
 
 if __name__ == "__main__":
-    main()
-ame__ == "__main__":
     main()

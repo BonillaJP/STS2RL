@@ -3,7 +3,7 @@ logs/
 models/
 checkpoints/
 tensorboard/
-references/
+_references/
 *.zip
 *.pt
 *.pth

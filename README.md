@@ -6,8 +6,10 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 
 *   **Synergy-CNN Vision:** The agent processes its hand using a 1D-Convolutional branch, allowing it to "scan" for card combos (e.g., Strength + Multi-hit) rather than just reading raw scalar numbers.
 *   **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's action masking, preventing invalid moves and desyncs.
-*   **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) to prevent the agent from attempting impossible moves.
+*   **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with robust selection detection. It natively prevents infinite toggle loops during multi-card selection events (e.g., "Choose 2 Cards") by utilizing aggressive string-casting for indices and expanded API flag detection.
 *   **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs or infinite loops and automatically reboots the specific game node without halting the entire training cluster.
+*   **Environment Stability:** Features module-level global constant management and robust dictionary-safe state parsing to ensure reliable distributed training across multiple nodes.
+*   **Closed-Loop Telemetry:** Implements a "verify-then-delete" log consolidation system. Upon reboot, the orchestrator automatically merges fragmented CSVs into master files, truncates "ghost steps" to match the brain checkpoint, and purges technical telemetry (TensorBoard/CSV) created after the checkpoint timestamp to ensure 100% data integrity.
 
 ## 🖥️ Cluster Setup & Game Cloning
 
@@ -56,11 +58,14 @@ This project utilizes **Stable Baselines3 (SB3)** to orchestrate the training lo
 
 ### Synergy-CNN & MaskablePPO (Neural Framework)
 The agent relies on a specialized neural network architecture tailored for Slay the Spire:
-*   **Maskable PPO (Proximal Policy Optimization):** Standard PPO wastes millions of steps trying to click disabled buttons. By utilizing `sb3-contrib`'s MaskablePPO, the environment passes a boolean mask array of length 317 alongside every observation. The network forces the logits of invalid actions to `-infinity` before the softmax layer. This guarantees that 100% of the gradient updates are spent evaluating valid tactical choices, radically improving sample efficiency.
+*   **Maskable PPO (Proximal Policy Optimization):** Standard PPO wastes millions of steps trying to click disabled buttons. By utilizing `sb3-contrib`'s MaskablePPO, the environment passes a boolean mask array of length 317 alongside every observation. The network forces the logits of invalid actions to `-infinity` before the softmax layer. This guarantees that 100% of the gradient updates are spent evaluating valid tactical choices.
+*   **Robust Multi-Card Selection:** To prevent infinite "toggle loops" where the agent unselects its first choice, the masking logic employs aggressive string-casting (`str()`) for all indices and scans for multiple API flag variations (`is_selected`, `isSelected`, `is_chosen`, `isChosen`). This ensures that once a card is selected, its action slot is immediately blocked, forcing the agent to fulfill multi-card requirements (e.g., "Choose 2") efficiently.
 *   **Synergy-CNN Vision:** Rather than treating the player's hand as a flat array of numbers, the environment extracts the hand into a 1D tensor and passes it through a 1D-Convolutional branch (`nn.Conv1d`).
     *   *Technical Implementation:* It sweeps a `kernel_size=3` over the hand's feature channels (cost, exhaust flags, damage values, enchants). This allows the network to natively detect spatial synergies—such as a zero-cost card sitting next to a high-damage card, or overlapping enchantments—before feeding the flattened spatial data into the fully connected `[256, 256]` policy layers.
 
 ### PPO Brain Hyperparameters
+*   **Unrestricted Model Loader:** The training script performs an exhaustive recursive search across all sub-directories (`checkpoints/`, `models/`, `hall_of_fame/`, etc.) and automatically resumes from the absolute newest `.zip` file based on disk timestamp.
+*   **Intelligent Stage Selection (Zip-Peeking):** Upon resuming, the orchestrator "peeks" inside the model zip to identify the current internal step count. It then automatically selects the correct Stage parameters (`n_steps`, `batch_size`) *before* initializing the brain, eliminating redundant stage hand-off transitions during reboots.
 *   **Rollout Buffer (Warmup Phase):** For the first 18,432 steps, the buffer uses `n_steps=1024` per node, resulting in a **3,072 step** update frequency to quickly establish early baselines.
 *   **Rollout Buffer (Main Phase):** Following the warmup, the main training stage uses `n_steps=3072` per node. With 3 training nodes, this results in exactly **9,216 steps** in the buffer before every neural weight update.
 *   **Batch Size:** 512.

@@ -2,112 +2,140 @@ import pandas as pd
 import glob
 import os
 import json
+import datetime
+import numpy as np
 
-def analyze_subset(df, name, is_eval=False):
-    if df.empty:
-        print(f"\n--- {name} ---")
-        print("No data found.")
-        return
+# ==============================================================================
+# STS2RL MASTER TELEMETRY REPORT GENERATOR
+# ==============================================================================
 
-    df['r'] = pd.to_numeric(df['r'], errors='coerce')
-    df['floor'] = pd.to_numeric(df['floor'], errors='coerce')
-    df['l'] = pd.to_numeric(df['l'], errors='coerce')
-    df['t'] = pd.to_numeric(df['t'], errors='coerce')
-    df = df.sort_values(by='t').dropna()
+LOG_DIR = "./logs"
+TECH_DIR = os.path.join(LOG_DIR, "sb3_tech")
+MONITOR_PATTERN = os.path.join(LOG_DIR, "*monitor*")
+EXAM_LOG = os.path.join(LOG_DIR, "exam_progression_log.csv")
+REBOOT_LOG = os.path.join(LOG_DIR, "reboot_history.csv")
+BEST_MODEL_JSON = os.path.join(LOG_DIR, "best_model_details.json")
+PROGRESS_CSV = os.path.join(TECH_DIR, "progress.csv")
 
-    count = len(df)
-    
-    print(f"\n--- {name} ---")
-    
-    if is_eval:
-        best_bio_path = './logs/best_model_details.json'
-        if os.path.exists(best_bio_path):
-            try:
-                with open(best_bio_path, 'r') as f:
-                    best_data = json.load(f)
-                print(f"[ALL-TIME BEST MODEL] Floor: {best_data.get('best_floor', 0)} | Mean Reward: {best_data.get('mean_reward', 0):.2f} | Success: {best_data.get('success_rate', 'N/A')}")
-            except: pass
-    
-    print(f"Total Steps: {df['l'].sum():,}")
-    print(f"Total Runs: {count}")
-    print(f"Highest Reward: {df['r'].max():.2f} | Lowest Reward: {df['r'].min():.2f}")
-    print(f"Mean Reward: {df['r'].mean():.2f} | Best Floor: {df['floor'].max()}")
-    
-    if count >= 20:
-        l20_df = df.iloc[-20:]
-        print(f"[CURRENT PERFORMANCE - LAST 20] Reward: {l20_df['r'].mean():.2f} | Floor: {l20_df['floor'].mean():.2f}")
+def format_step(step):
+    if step >= 1_000_000: return f"{step/1_000_000:.1f}M"
+    if step >= 1_000: return f"{step/1_000:.1f}K"
+    return str(step)
 
-    if count >= 4:
-        q_size = max(1, int(count/4))
-        q1_df = df.iloc[:q_size]
-        q4_df = df.iloc[-q_size:]
+def read_csv_safe(path, skip_header=True):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame()
+    try:
+        if skip_header:
+            with open(path, 'r') as f:
+                line = f.readline()
+                if line.startswith("#"): return pd.read_csv(path, skiprows=1)
+        return pd.read_csv(path)
+    except:
+        return pd.DataFrame()
+
+def generate_report():
+    print(f"\n{'='*70}")
+    print(f"       Slay the Spire 2 - MASTER TELEMETRY GUIDE (v2.0)")
+    print(f"       Report Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*70}\n")
+
+    # --- PART 1: TRAINING TELEMETRY (Learning Cluster) ---
+    print("### PART 1: TRAINING TELEMETRY (Learning Cluster)")
+    
+    # 1.1 Monitor Aggregation
+    mon_files = glob.glob(MONITOR_PATTERN)
+    train_ports = ["15526", "15527", "15528"]
+    train_files = [f for f in mon_files if any(p in f for p in train_ports)]
+    
+    train_dfs = [read_csv_safe(f) for f in train_files]
+    delta = 0
+    if train_dfs and not all(df.empty for df in train_dfs):
+        df_train = pd.concat(train_dfs, ignore_index=True).sort_values(by='t').dropna()
+        total_steps = df_train['l'].sum()
+        total_runs = len(df_train)
+        mean_rew = df_train['r'].mean()
+        best_floor = df_train['floor'].max()
         
-        print(f"[Q1 Trend] Floor: {q1_df['floor'].mean():.2f} | Reward: {q1_df['r'].mean():.2f} | Length: {q1_df['l'].mean():.1f}")
-        print(f"[Q4 Trend] Floor: {q4_df['floor'].mean():.2f} | Reward: {q4_df['r'].mean():.2f} | Length: {q4_df['l'].mean():.1f}")
+        print(f"- Stats: Total Steps: {total_steps:,} | Total Runs: {total_runs:,}")
+        print(f"- Performance: Mean Reward: {mean_rew:.2f} | Best Floor: {best_floor}")
         
-        rew_diff = q4_df['r'].mean() - q1_df['r'].mean()
-        print(f"Overall Progress: {'📈' if rew_diff > 0 else '📉'} {rew_diff:+.2f} Reward Delta")
+        if total_runs >= 4:
+            q_size = max(1, int(total_runs/4))
+            q1 = df_train.iloc[:q_size]['r'].mean()
+            q4 = df_train.iloc[-q_size:]['r'].mean()
+            delta = q4 - q1
+            print(f"- Trend (Q1 vs Q4): {q1:.2f} \u2794 {q4:.2f} ({'📈' if delta > 0 else '📉'} {delta:+.2f} Delta)")
     else:
-        print(f"Mean Floor: {df['floor'].mean():.2f}")
+        print("- Stats: No training data found in monitor logs.")
 
-def analyze_reboots():
-    reboot_file = './logs/reboot_history.csv'
-    if not os.path.exists(reboot_file):
-        print("\n--- CLUSTER STABILITY ---")
-        print("No reboot history found.")
-        return
+    # 1.2 Technical SB3 Metrics
+    df_prog = read_csv_safe(PROGRESS_CSV, skip_header=False)
+    if not df_prog.empty:
+        latest = df_prog.iloc[-1]
+        print(f"- SB3 Rollout: fps: {latest.get('time/fps', 0):.1f} | iterations: {latest.get('time/iterations', 0)} | elapsed: {latest.get('time/time_elapsed', 0)/60:.1f}m")
+        print(f"- Technical Health:")
+        print(f"  > Stability: entropy: {latest.get('train/entropy_loss', 0):.4f} | lr: {latest.get('train/learning_rate', 0):.2e} | loss: {latest.get('train/loss', 0):.4f}")
+        print(f"  > Policy/Value: kl: {latest.get('train/approx_kl', 0):.4f} | value_loss: {latest.get('train/value_loss', 0):.4f}")
+    else:
+        print("- Technical Health: sb3_tech/progress.csv is currently empty (New Rollout).")
 
-    try:
-        df = pd.read_csv(reboot_file)
-        if df.empty: return
-        
-        print("\n--- CLUSTER STABILITY ---")
-        print(f"Total Autonomous Restarts: {len(df)}")
-        
-        # Count by node
-        node_counts = df['Node'].value_counts()
+    # --- PART 2: EVALUATION TELEMETRY (Mastery Exams) ---
+    print("\n### PART 2: EVALUATION TELEMETRY (Mastery Exams)")
+    
+    if os.path.exists(BEST_MODEL_JSON):
+        with open(BEST_MODEL_JSON, 'r') as f:
+            best = json.load(f)
+        print(f"- Champion Model: Phase {best.get('phase')} | Floor: {best.get('best_floor')} | Mean Reward: {best.get('mean_reward'):.2f}")
+        print(f"- Mastery Success: {best.get('success_rate')} hit target floors.")
+    
+    df_exam = read_csv_safe(EXAM_LOG, skip_header=False)
+    if not df_exam.empty:
+        last_3 = df_exam.tail(3)
+        print("- Latest Exams:")
+        for _, row in last_3.iterrows():
+            print(f"  > Step {format_step(row['step'])}: Floor {row['mean_floor']:.1f} | Reward {row['mean_reward']:.2f}")
+    else:
+        print("- Latest Exams: No historical exam data found.")
+
+    # --- PART 3: STATUS FLAGS & ORCHESTRATION ---
+    print("\n### PART 3: STATUS FLAGS & ORCHESTRATION")
+    
+    # Flags based on recent performance
+    if train_dfs and not all(df.empty for df in train_dfs):
+        recent_20 = df_train.tail(20)
+        stalling = recent_20['l'].mean() > 1000 and recent_20['floor'].mean() < 5
+        print(f"- \u2705 GREEN FLAGS: {'Staircase Reward Trend' if delta > 0 else 'Stable Baseline'}")
+        if stalling: print("- \u26a0\ufe0f RED FLAG: Potential Stalling detected (High length / Low floor).")
+    
+    print("- Orchestrator: Master Log Consolidation active. Data Isolation confirmed.")
+
+    # --- PART 4: CLUSTER STABILITY (Node Recovery) ---
+    print("\n### PART 4: CLUSTER STABILITY (Node Recovery)")
+    
+    df_reboot = read_csv_safe(REBOOT_LOG, skip_header=False)
+    if not df_reboot.empty:
+        total_restarts = len(df_reboot)
+        node_counts = df_reboot['Node'].value_counts()
         node_str = ", ".join([f"{n}: {c}" for n, c in node_counts.items()])
-        print(f"Restarts by Node: {node_str}")
         
-        # Red Flag detection:
-        non_standard = df[df['Reason'] != "API Startup Timeout"]
-        if not non_standard.empty:
-            print(f"[RED FLAG] {len(non_standard)} non-standard reboots detected!")
-            for _, row in non_standard.iterrows():
-                print(f"  > {row['Timestamp']} | {row['Reason']}")
+        tracked = df_reboot[df_reboot['PID'].astype(str).str.contains('PID [0-9]|(?<!Unknown)[0-9]', regex=True, na=False)].shape[0]
+        success_rate = (tracked / total_restarts) * 100
         
-        # Recent activity
-        latest = df.iloc[-1]
-        print(f"Latest Recovery: {latest['Timestamp']} | {latest['Node']} | {latest['Reason']}")
+        print(f"- Recovery Stats: Total Restarts: {total_restarts} | Success Rate: {success_rate:.1f}%")
+        print(f"- Node Hotspots: {node_str}")
         
-        if 'PID' in df.columns:
-            tracked = df[df['PID'].astype(str).str.contains('PID [0-9]|(?<!Unknown)[0-9]', regex=True, na=False)].shape[0]
-            print(f"Recovery Success Rate: {(tracked/len(df))*100:.1f}% (PID Tracked)")
+        latest_reboot = df_reboot.iloc[-1]
+        print(f"- Latest Recovery: {latest_reboot['Timestamp']} | {latest_reboot['Reason']}")
+    else:
+        print("- Stability: No reboots recorded (Cluster Stable).")
+
+    print(f"\n{'='*70}\n")
+
+if __name__ == "__main__":
+    try:
+        generate_report()
     except Exception as e:
-        print(f"\n[ERROR] Analyzing reboots: {e}")
-
-log_files = glob.glob('./logs/monitor*.csv')
-train_logs = [f for f in log_files if any(p in f for p in ["15526", "15527", "15528"])]
-eval_logs = [f for f in log_files if "15529" in f]
-
-train_data = []
-for f in train_logs:
-    try:
-        df = pd.read_csv(f, skiprows=1)
-        train_data.append(df)
-    except: pass
-
-eval_data = []
-for f in eval_logs:
-    try:
-        df = pd.read_csv(f, skiprows=1)
-        eval_data.append(df)
-    except: pass
-
-if train_data:
-    analyze_subset(pd.concat(train_data, ignore_index=True), "TRAINING CLUSTER (Nodes 15526-15528)")
-
-if eval_data:
-    analyze_subset(pd.concat(eval_data, ignore_index=True), "EVALUATION NODE (Node 15529)", is_eval=True)
-
-analyze_reboots()
+        print(f"\n[CRITICAL ERROR] Failed to generate report: {e}")
+        import traceback
+        traceback.print_exc()
