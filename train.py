@@ -294,7 +294,9 @@ class PhaseManagerCallback(BaseCallback):
     def _apply_phase(self):
         self.training_env.env_method("set_training_phase", self.phase_idx)
         self.save_state()
-        self.model.ent_coef = max(0.01, 0.05 * (0.7 ** (self.phase_idx - 1)))
+        # Dynamic Entropy: Base decay + "Shock" boost if failing
+        base_entropy = max(0.01, 0.05 * (0.7 ** (self.phase_idx - 1)))
+        self.model.ent_coef = min(0.05, base_entropy + (self.consecutive_failures * 0.01))
         lr = 1e-4 if self.phase_idx < 3 else 5e-5
         for p in self.model.policy.optimizer.param_groups: p['lr'] = lr
 
@@ -318,7 +320,7 @@ class PhaseManagerCallback(BaseCallback):
         self.model.save(model_path)
         norm_env = unwrap_vec_normalize(self.training_env)
         if norm_env: norm_env.save(vec_path)
-        print(f"\n[CHECKPOINT] Updated Brain Secured at Step {current_step:,}")
+        print(f"[CHECKPOINT] Updated Brain Secured at Step {current_step:,}")
         
         all_zips = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "sts2_mid_run_step_*.zip")), key=os.path.getmtime)
         while len(all_zips) > 3:
@@ -329,7 +331,7 @@ class PhaseManagerCallback(BaseCallback):
                 if os.path.exists(oldest_vec): os.remove(oldest_vec)
             except: pass
         
-        print(f"\n\n{'='*60}")
+        print(f"\n{'='*60}")
         print(f"[EXAM] MILESTONE REACHED: {current_step:,} steps")
         print(f"[EXAM] Starting Deterministic Skills Test on Port {EVAL_PORT}...")
         print(f"{'='*60}\n")
@@ -363,9 +365,10 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        promo_reward_targets = {1: 15.0, 2: 40.0, 3: 80.0}
-        promo_floor_targets = {1: 12.0, 2: 28.0, 3: 45.0}
-        exam_win_floors = {1: 17, 2: 34, 3: 51, 4: 51}
+        # Mastery Thresholds (Recalibrated for Bounty Economy)
+        promo_reward_targets = {1: 100.0, 2: 250.0, 3: 450.0}
+        promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0}
+        exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51}
         
         target_win_floor = exam_win_floors.get(self.phase_idx, 51)
         wins = sum(1 for f in total_floors if f >= target_win_floor)
@@ -375,9 +378,9 @@ class PhaseManagerCallback(BaseCallback):
         
         latest_stats_path = os.path.join(LOG_DIR, f"latest_exam_stats_step_{current_step}.txt")
         with open(latest_stats_path, "w") as f:
-            f.write(f"=========================================\n")
+            f.write(f"{'='*40}\n")
             f.write(f"LATEST EXAM REPORT - STEP {current_step}\n")
-            f.write(f"=========================================\n")
+            f.write(f"{'='*40}\n")
             f.write(f"Phase: {self.phase_idx}\n")
             f.write(f"Total Training Steps: {current_step}\n\n")
             f.write(f"--- FLOOR METRICS (10-Game Exam) ---\n")
@@ -388,7 +391,7 @@ class PhaseManagerCallback(BaseCallback):
             f.write(f"Mean Score: {mean_reward_final:.2f}\n")
             f.write(f"Highest Score: {np.max(total_rewards):.2f}\n")
             f.write(f"Lowest Score: {np.min(total_rewards):.2f}\n")
-            f.write(f"=========================================\n")
+            f.write(f"{'='*40}\n")
         
         all_latest = sorted(glob.glob(os.path.join(LOG_DIR, "latest_exam_stats_step_*.txt")), key=os.path.getmtime)
         while len(all_latest) > 3:
@@ -458,9 +461,9 @@ class PhaseManagerCallback(BaseCallback):
                 if norm_env: norm_env.save(rank_vec_path)
                 
                 with open(rank_report_path, "w") as f:
-                    f.write(f"=========================================\n")
+                    f.write(f"{'='*40}\n")
                     f.write(f"TOP MODEL RANK #{rank} - VERIFIED EXAM\n")
-                    f.write(f"=========================================\n")
+                    f.write(f"{'='*40}\n")
                     f.write(f"Phase: {self.phase_idx} | Step: {current_step}\n")
                     f.write(f"Mean Reward: {mean_reward_final:.2f}\n")
                     f.write(f"Mean Floor:  {mean_floor:.1f}\n")
@@ -470,7 +473,7 @@ class PhaseManagerCallback(BaseCallback):
                     f.write(f"--- EPISODE BREAKDOWN ---\n")
                     for i, (r, f_val) in enumerate(zip(total_rewards, total_floors)):
                         f.write(f"Run {i+1}: Floor {f_val} | Reward {r:.1f}\n")
-                    f.write(f"=========================================\n")
+                    f.write(f"{'='*40}\n")
                 
                 for f in glob.glob(os.path.join(TOP_MODELS_DIR, f"*_rank_{rank}_*")):
                     if entry["id"] not in f:
@@ -489,9 +492,9 @@ class PhaseManagerCallback(BaseCallback):
             
             best_stats_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_stats_Phase_{self.phase_idx}.txt")
             with open(best_stats_path, "w") as f:
-                f.write(f"=========================================\n")
+                f.write(f"{'='*40}\n")
                 f.write(f"CHAMPION MODEL - PHASE {self.phase_idx}\n")
-                f.write(f"=========================================\n")
+                f.write(f"{'='*40}\n")
                 f.write(f"Total Training Steps: {current_step}\n")
                 f.write(f"Total Exam Runs: {self.n_calls}\n\n")
                 f.write(f"--- FLOOR METRICS (10-Game Exam) ---\n")
@@ -502,7 +505,7 @@ class PhaseManagerCallback(BaseCallback):
                 f.write(f"Mean Score: {mean_reward_final:.2f}\n")
                 f.write(f"Highest Score: {np.max(total_rewards):.2f}\n")
                 f.write(f"Lowest Score: {np.min(total_rewards):.2f}\n")
-                f.write(f"=========================================\n")
+                f.write(f"{'='*40}\n")
             print(f"  [+] New Personal Best for Phase {self.phase_idx}!")
         else:
             self.consecutive_regressions += 1
@@ -566,7 +569,7 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
     model_params = {
         "policy": "MlpPolicy", "env": env, "verbose": 1, "tensorboard_log": "./tensorboard/",
         "device": "auto", "learning_rate": 1e-4, "n_steps": n_steps, "batch_size": batch_size,
-        "n_epochs": 15, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.15, "ent_coef": 0.05,
+        "n_epochs": 10, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.2, "ent_coef": 0.05,
         "vf_coef": 0.7, "policy_kwargs": policy_kwargs
     }
     
@@ -574,7 +577,7 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
         try:
             print(f"[LOAD] Attempting to resume full model state from {weights_path}...")
             model = MaskablePPO.load(weights_path, env=env, n_steps=n_steps, batch_size=batch_size)
-            print(f"[LOAD] Success! Full model state (including Optimizer) restored.")
+            print(f"[LOAD] Success! Full model state restored.")
             return model
         except Exception as e:
             print(f"[LOAD] Partial load fallback (Parameters mismatch or error): {e}")

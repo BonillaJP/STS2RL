@@ -106,15 +106,16 @@ The current numeric values are estimated based on the "Master Class" architectur
 The agent progresses through a dynamic curriculum (Phase 1 to Phase 4). Progression requires passing a "Mastery Exam" on the dedicated Evaluation Node.
 
 **Promotion Requirements:**
-To advance to the next phase, the agent must meet *both* a Mean Floor and Mean Reward target during its 10-episode exam:
-*   **Phase 1 (Act 1 Mastery):** To promote, requires **Mean Floor >= 12.0** AND **Mean Reward >= 15.0**. (Target Win Floor: 17)
-*   **Phase 2 (Act 2 Mastery):** To promote, requires **Mean Floor >= 28.0** AND **Mean Reward >= 40.0**. (Target Win Floor: 34)
-*   **Phase 3 (Act 3 Mastery):** To promote, requires **Mean Floor >= 45.0** AND **Mean Reward >= 80.0**. (Target Win Floor: 51)
-*   **Phase 4 (Maximum Mastery):** The highest difficulty. The `ent_coef` (entropy) is aggressively decayed from `0.05` down to `0.01`, shifting the brain from wild exploration to pure, deterministic exploitation.
+To advance to the next phase, the agent must meet both a Mean Floor and Mean Reward target during its 10-episode exam. Targets are calibrated to match the bounty economy:
+*   **Phase 1 (Act 1 Mastery):** Requires **Mean Floor >= 16.0** AND **Mean Reward >= 100.0**. (Proves ability to reach the final Act 1 campfire while hunting Elites).
+*   **Phase 2 (Act 2 Mastery):** Requires **Mean Floor >= 33.0** AND **Mean Reward >= 250.0**. (Proves mastery of Act 2 scaling).
+*   **Phase 3 (Act 3 Mastery):** Requires **Mean Floor >= 50.0** AND **Mean Reward >= 450.0**. (Proves readiness for maximum difficulty).
+*   **Phase 4 (Maximum Mastery):** The highest difficulty. The `ent_coef` is aggressively decayed, shifting the brain to pure deterministic exploitation.
 
 **Demotion (Step-Down Recovery):**
-If the agent is struggling in a higher phase (Phase 2+), it is dynamically demoted to repair its foundational logic. 
-*   **Condition:** If the agent achieves a **0% success rate** (0 wins) at hitting the target floor for **3 consecutive exams**, it drops down exactly 1 Phase (e.g., Phase 3 -> Phase 2).
+If performance stalls in Phase 2+, the system implements a recovery step-down to repair foundational logic.
+*   **Doorstep Thresholds:** To prevent accidental demotion loops caused by boss-fight deaths, "success" is defined by reaching the Act's final door (Floor 16, 33, or 50).
+*   **Condition:** If the agent fails to reach these doorstep thresholds (0% success rate) for **3 consecutive exams**, it drops down exactly 1 Phase.
 
 *Note: All targets (floors, rewards, and demotion triggers) are fully customizable in `train.py` depending on training goals.*
 

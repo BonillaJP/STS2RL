@@ -614,7 +614,7 @@ class SlayTheSpire2Env(gym.Env):
                 self.reboot_reason = "Timeout (Invalid Action Loop)"
                 self.needs_reboot = True
                 return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
-            self.stagnant_steps += 1; time.sleep(0.05); return self._flatten_state(self.current_state), -0.1, False, False, {"floor": self.previous_floor}
+            self.stagnant_steps += 1; time.sleep(0.05); return self._flatten_state(self.current_state), -1.0, False, False, {"floor": self.previous_floor}
         
         if payload.get("action") == "play_card":
             card_idx = payload.get("card_index")
@@ -651,14 +651,12 @@ class SlayTheSpire2Env(gym.Env):
             self.state_action_counts = {}
             self.last_state_hash = new_hash
 
-        # --- ENEMY TURN WAIT STATE ---
         if new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
             while new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
                 time.sleep(0.05)
                 new_state = self._raw_state()
                 if not new_state: break
         
-        # --- NEUTRAL ABORT FAILSAFE ---
         if new_state.get("state_type") == "menu" and new_state.get("menu_screen") == "popup":
             msg = new_state.get("message", "").lower()
             if "corrupt" in msg or "not able to load" in msg:

@@ -75,7 +75,7 @@ def generate_report():
         print(f"  > Stability: entropy: {latest.get('train/entropy_loss', 0):.4f} | lr: {latest.get('train/learning_rate', 0):.2e} | loss: {latest.get('train/loss', 0):.4f}")
         print(f"  > Policy/Value: kl: {latest.get('train/approx_kl', 0):.4f} | value_loss: {latest.get('train/value_loss', 0):.4f}")
     else:
-        print("- Technical Health: sb3_tech/progress.csv is currently empty.")
+        print("- Technical Health: progress.csv is empty.")
 
     print("\n### PART 2: EVALUATION TELEMETRY (Mastery Exams)")
     
@@ -100,49 +100,47 @@ def generate_report():
         recent_20 = df_train.tail(20)
         stalling = recent_20['l'].mean() > 1000 and recent_20['floor'].mean() < 5
         print(f"- [STATUS]: {'[UP] Staircase Reward Trend' if delta > 0 else '[OK] Stable Baseline'}")
-        if stalling: print("- [WARNING]: Potential Stalling detected (High length / Low floor).")
+        if stalling: print("- [WARNING]: Potential Stalling detected.")
     
     print("- Orchestrator: Master Log Consolidation active. Data Isolation confirmed.")
-# --- PART 4: CLUSTER STABILITY (Node Recovery) ---
-print("\n### PART 4: CLUSTER STABILITY (Node Recovery)")
 
-df_reboot = read_csv_safe(REBOOT_LOG, skip_header=False)
-if not df_reboot.empty:
-    total_restarts = len(df_reboot)
-    node_counts = df_reboot['Node'].value_counts()
-    node_str = ", ".join([f"{n}: {c}" for n, c in node_counts.items()])
-
-    tracked = df_reboot[df_reboot['PID'].astype(str).str.contains('PID [0-9]|(?<!Unknown)[0-9]', regex=True, na=False)].shape[0]
-    success_rate = (tracked / total_restarts) * 100
-
-    print(f"- Recovery Stats: Total Restarts: {total_restarts} | Success Rate: {success_rate:.1f}%")
-    print(f"- Node Hotspots: {node_str}")
-
-    latest_reboot = df_reboot.iloc[-1]
-    print(f"- Latest Recovery: {latest_reboot['Timestamp']} | {latest_reboot['Reason']}")
-else:
-    print("- Stability: No reboots recorded (Cluster Stable).")
-
-# --- PART 5: STORAGE TELEMETRY (Godot Logs) ---
-print("\n### PART 5: STORAGE TELEMETRY (Godot Logs)")
-appdata = os.getenv('APPDATA')
-if appdata:
-    godot_log_dir = os.path.join(appdata, "SlayTheSpire2", "logs")
-    if os.path.exists(godot_log_dir):
-        total_size_bytes = sum(os.path.getsize(os.path.join(godot_log_dir, f)) for f in os.listdir(godot_log_dir) if os.path.isfile(os.path.join(godot_log_dir, f)))
-        size_gb = total_size_bytes / (1024**3)
-        print(f"- Godot Log Size: {size_gb:.2f} GB")
-        if size_gb > 5.0:
-            print(f"- [WARNING]: Storage bloat detected ({size_gb:.2f} GB). Recommend restarting training instance to auto-vacuum logs.")
-        else:
-            print("- Storage Health: [OK] Log size is within safe limits.")
+    print("\n### PART 4: CLUSTER STABILITY (Node Recovery)")
+    
+    df_reboot = read_csv_safe(REBOOT_LOG, skip_header=False)
+    if not df_reboot.empty:
+        total_restarts = len(df_reboot)
+        node_counts = df_reboot['Node'].value_counts()
+        node_str = ", ".join([f"{n}: {c}" for n, c in node_counts.items()])
+        
+        tracked = df_reboot[df_reboot['PID'].astype(str).str.contains('PID [0-9]|(?<!Unknown)[0-9]', regex=True, na=False)].shape[0]
+        success_rate = (tracked / total_restarts) * 100
+        
+        print(f"- Recovery Stats: Total Restarts: {total_restarts} | Success Rate: {success_rate:.1f}%")
+        print(f"- Node Hotspots: {node_str}")
+        
+        latest_reboot = df_reboot.iloc[-1]
+        print(f"- Latest Recovery: {latest_reboot['Timestamp']} | {latest_reboot['Reason']}")
     else:
-        print("- Storage: Godot log directory not found.")
-else:
-    print("- Storage: Unable to locate APPDATA environment variable.")
+        print("- Stability: No reboots recorded.")
 
-print(f"\n{'='*70}\n")
+    print("\n### PART 5: STORAGE TELEMETRY (Godot Logs)")
+    appdata = os.getenv('APPDATA')
+    if appdata:
+        godot_log_dir = os.path.join(appdata, "SlayTheSpire2", "logs")
+        if os.path.exists(godot_log_dir):
+            total_size_bytes = sum(os.path.getsize(os.path.join(godot_log_dir, f)) for f in os.listdir(godot_log_dir) if os.path.isfile(os.path.join(godot_log_dir, f)))
+            size_gb = total_size_bytes / (1024**3)
+            print(f"- Godot Log Size: {size_gb:.2f} GB")
+            if size_gb > 5.0:
+                print(f"- [WARNING]: Storage bloat detected ({size_gb:.2f} GB). Recommend restarting training instance.")
+            else:
+                print("- Storage Health: [OK] Log size is within safe limits.")
+        else:
+            print("- Storage: Godot log directory not found.")
+    else:
+        print("- Storage: Unable to locate APPDATA environment variable.")
 
+    print(f"\n{'='*70}\n")
 
 if __name__ == "__main__":
     try:
