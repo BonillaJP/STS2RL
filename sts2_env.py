@@ -12,7 +12,6 @@ import re
 import datetime
 import glob
 
-# Hash space compressed to 10000 for dense MLP representations while avoiding collisions
 def stable_hash(name, max_val=10000):
     if not name: return 0
     return (int(hashlib.md5(str(name).encode()).hexdigest(), 16) % max_val) + 1
@@ -58,7 +57,6 @@ class SlayTheSpire2Env(gym.Env):
         super().__init__()
         self.port = port
         
-        # Game path detection
         if game_path and os.path.isdir(game_path):
             node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
             game_path = os.path.join(game_path, f"Node {node_id}.exe")
@@ -95,16 +93,14 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_enemy_block_sum = -1
         self.last_prog_selected_cards = []
         
-        # Bounty Flags
         self.pending_elite_bounty = False
         self.pending_boss_bounty = False
         self.pending_smith_bounty = False
         self.global_step = 0
         self.last_state_hash = ""
-        self.state_action_counts = {} # Maps action_idx -> consecutive failure count
+        self.state_action_counts = {} 
         self._vacuum_disk()
         
-        # Fresh Debug Trace for this run
         self.trace_path = f"logs/node_trace_{self.port}.jsonl"
         try: 
             os.makedirs("logs", exist_ok=True)
@@ -158,7 +154,6 @@ class SlayTheSpire2Env(gym.Env):
         except: pass
 
     def _vacuum_disk(self):
-        # Disk Vacuum: Clean Godot logs and Sentry reports to preserve disk space.
         appdata = os.getenv('APPDATA')
         if appdata:
             game_data_path = os.path.join(appdata, "SlayTheSpire2")
@@ -178,7 +173,7 @@ class SlayTheSpire2Env(gym.Env):
             except: pass
 
     def _reboot_game_client(self, reason=None):
-        print(f"\n[REBOOT] Port {self.port} is frozen. Physically restarting Node...")
+        print(f"\n[REBOOT] Port {self.port} is frozen. physically restarting Node...")
         target_pid = "Unknown"
         killed = False
         try:
@@ -236,12 +231,10 @@ class SlayTheSpire2Env(gym.Env):
         time.sleep(30.0)
 
     def action_masks(self):
-        # --- STATE-FIRST ARCHITECTURE ---
         state = self.current_state
         mask = np.zeros(len(FLAT_ACTIONS), dtype=bool)
         if not state: return mask
         
-        # --- SCREEN DETECTION ---
         raw_screen = state.get("state_type", "unknown")
         player = state.get("player", {})
         battle = state.get("battle", {})
@@ -264,7 +257,6 @@ class SlayTheSpire2Env(gym.Env):
                 for idx in valid_indices:
                     if idx is not None and idx < count: mask[start_idx + idx] = True
         
-        # --- POTION DISCARD MASKING ---
         potions = player.get("potions", [])
         if len(potions) >= player.get("max_potion_slots", 3):
             if screen in ["combat", "rewards", "shop", "fake_merchant", "event", "neow", "treasure", "rest_site"]:
@@ -275,7 +267,7 @@ class SlayTheSpire2Env(gym.Env):
 
         if screen == "combat":
             if battle.get("is_play_phase"):
-                mask[80] = True # End Turn
+                mask[80] = True 
                 for c_idx, card in enumerate(player.get("hand", [])[:10]):
                     can_play_flag = card.get("can_play")
                     if can_play_flag is None: can_play_flag = card.get("can_afford", True)
@@ -315,7 +307,7 @@ class SlayTheSpire2Env(gym.Env):
         elif screen == "rewards":
             rew = state.get("rewards", {})
             set_mask(92, 15, [i.get("index") for i in rew.get("items", [])])
-            if rew.get("can_proceed") or not rew.get("items"): mask[123] = True # proceed
+            if rew.get("can_proceed") or not rew.get("items"): mask[123] = True
         elif screen == "card_reward":
             cr = state.get("card_reward", {})
             set_mask(107, 15, [c.get("index") for c in cr.get("cards", [])])
@@ -324,7 +316,7 @@ class SlayTheSpire2Env(gym.Env):
             ev = state.get("event") or state.get("neow") or {}
             opts = ev.get("options", [])
             if ev.get("in_dialogue"):
-                mask[134] = True # advance_dialogue
+                mask[134] = True 
             else:
                 selectable = [o.get("index") for o in opts if not o.get("is_locked") and not o.get("was_chosen")]
                 if selectable: set_mask(124, 10, selectable)
@@ -347,7 +339,6 @@ class SlayTheSpire2Env(gym.Env):
             match = re.search(r'\b(\d+)\b', prompt)
             max_sel = int(match.group(1)) if match else 1
             
-            # --- ADAPTIVE SELECTION LIMIT ---
             raw_sel = []
             if "selected_cards" in cs: raw_sel.extend(cs.get("selected_cards", []))
             if "selected" in cs: raw_sel.extend(cs.get("selected", []))
@@ -398,7 +389,6 @@ class SlayTheSpire2Env(gym.Env):
             for cell in cs.get("clickable_cells", []): mask[217 + (cell.get("y", 0) * 9) + cell.get("x", 0)] = True
             if cs.get("can_proceed"): mask[316] = True
         
-        # --- GLOBAL STAGNATION SUPPRESSION ---
         current_hash = stable_hash(json.dumps(state, sort_keys=True))
         if current_hash == self.last_state_hash:
             for act_idx, count in self.state_action_counts.items():
@@ -694,7 +684,7 @@ class SlayTheSpire2Env(gym.Env):
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
         if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
 
-        reward -= 0.10 # Neutral Step Tax
+        reward -= 0.10 
         if floor_now > self.previous_floor:
             reward += f_b
             if self.pending_boss_bounty: reward += b_b; self.pending_boss_bounty = False

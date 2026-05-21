@@ -34,26 +34,21 @@ VICTORY_SEEDS_FILE = os.path.join(LOG_DIR, "victory_seeds.json")
 
 SESSION_ID = int(time.time())
 
-# Training Nodes: [15526, 15527, 15528]
-# Evaluation Node: [15529]
 TRAIN_PORTS = [15526, 15527, 15528]
 EVAL_PORT = 15529
 
-# --- BUFFER STAGES ---
 BUFFER_STAGES = [
     (1024, 256, 18_432), 
     (3072, 512, 100_000_000)
 ]
 
-# --- PERFORMANCE TRACKERS ---
 PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 
-# ==============================================================================
-# --- MASTER CLASS FEATURE EXTRACTOR ---
-# ==============================================================================
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
         super().__init__(observation_space, features_dim=1152)
+        # 1D-CNN branch for hand synergy analysis
+        # Input shape: (batch, 30, 10) -> (batch, hand_features, hand_size)
         self.hand_cnn = nn.Sequential(
             nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -99,7 +94,6 @@ class GlobalPerformanceTracker:
         self.hof_entries.append({"reward": float(reward), "path": model_path, "date": str(datetime.datetime.now())})
         self.hof_entries = sorted(self.hof_entries, key=lambda x: x["reward"], reverse=True)
         
-        # Physical Disk Cleanup: Keep only top 5 files
         if len(self.hof_entries) > 5:
             to_delete = self.hof_entries[5:]
             self.hof_entries = self.hof_entries[:5]
@@ -121,14 +115,12 @@ def synchronize_logs(current_step, checkpoint_path=None):
     """Merges fragmented logs and truncates ghost steps to ensure 100% data integrity."""
     print(f"[INTEGRITY] Synchronizing logs with current brain step: {current_step:,}...")
     
-    # 1. Rewind Technical SB3/TensorBoard Logs
     tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint_time = os.path.getmtime(checkpoint_path)
         tech_files = glob.glob(os.path.join(tech_log_dir, "*"))
         purged_count = 0
         for path in tech_files:
-            # Delete any technical log file created AFTER the checkpoint was saved
             if os.path.getmtime(path) > checkpoint_time:
                 try:
                     os.remove(path)
@@ -137,7 +129,6 @@ def synchronize_logs(current_step, checkpoint_path=None):
         if purged_count > 0:
             print(f"  > sb3_tech: Purged {purged_count} future/ghost session files.")
 
-    # 2. Sync Technical CSVs
     log_files = {os.path.join(tech_log_dir, "progress.csv"): "timesteps", "exam_progression_log.csv": "step"}
     for path, step_col in log_files.items():
         if os.path.exists(path) and os.path.getsize(path) > 0:
@@ -151,20 +142,18 @@ def synchronize_logs(current_step, checkpoint_path=None):
                         print(f"  > {os.path.basename(path)}: Truncated {original_len - len(df)} rows.")
             except: pass
 
-    # 3. Consolidated Master Log Sync (Node Monitors)
     target_node_steps = current_step // len(TRAIN_PORTS)
     for port in TRAIN_PORTS + [EVAL_PORT]:
-        # Gather ALL fragments for this node (handles double extensions .csv.monitor.csv)
         fragments = glob.glob(os.path.join(LOG_DIR, f"*monitor*{port}*"))
         master_path = os.path.join(LOG_DIR, f"monitor_{port}_master.csv")
         
         if not fragments: continue
         
         combined_data = []
-        header_to_keep = f'#{{ "t_start": {time.time()}, "env_id": "None" }}\n' # Fallback header
+        header_to_keep = f'#{{ "t_start": {time.time()}, "env_id": "None" }}\n'
         
         for f_path in fragments:
-            if "master" in f_path: continue # Don't re-merge the master into itself
+            if "master" in f_path: continue
             try:
                 with open(f_path, 'r') as f:
                     line = f.readline()
@@ -173,20 +162,17 @@ def synchronize_logs(current_step, checkpoint_path=None):
                     if not df.empty: combined_data.append(df)
             except: pass
             
-        # Add existing master data if it exists
         if os.path.exists(master_path):
             try:
                 with open(master_path, 'r') as f:
-                    f.readline() # skip header
+                    f.readline() 
                     df = pd.read_csv(f)
                     if not df.empty: combined_data.insert(0, df)
             except: pass
 
         if combined_data:
-            # Merge and sort by time 't'
             master_df = pd.concat(combined_data, ignore_index=True).sort_values(by='t').drop_duplicates()
             
-            # TRUNCATE GHOST RUNS (Only for training nodes)
             if port in TRAIN_PORTS:
                 master_df['cumsum_l'] = master_df['l'].cumsum()
                 original_len = len(master_df)
@@ -196,12 +182,10 @@ def synchronize_logs(current_step, checkpoint_path=None):
             else:
                 cleaned_count = 0
 
-            # Write single Master File
             with open(master_path, 'w', newline='') as f:
                 f.write(header_to_keep)
                 master_df.to_csv(f, index=False)
             
-            # Physical Cleanup: Delete all fragments (they are now in master)
             for f_path in fragments:
                 if "master" not in f_path:
                     try: os.remove(f_path)
@@ -211,7 +195,6 @@ def synchronize_logs(current_step, checkpoint_path=None):
             if cleaned_count > 0: status += f" and cleaned {cleaned_count} ghost runs"
             print(f"  > Port {port}: {status}. Master log established.")
 
-    # 4. Final Clutter Vacuum
     all_junk = glob.glob(os.path.join(LOG_DIR, "*tfevents*")) + glob.glob(os.path.join(LOG_DIR, "*monitor*"))
     for path in all_junk:
         if "master" in path or os.path.isdir(path): continue
@@ -243,7 +226,6 @@ class TensorboardMetricsCallback(BaseCallback):
                 floor = info.get("floor", 0)
                 reward = info["episode"]["r"]
                 
-                # Check for Hall of Fame (All-time high single run)
                 if reward > self.tracker.best_reward:
                     hof_path = os.path.join(HOF_DIR, f"hof_score_{int(reward)}_step_{self.model.num_timesteps}.zip")
                     hof_vec_path = hof_path.replace(".zip", ".pkl")
@@ -251,7 +233,7 @@ class TensorboardMetricsCallback(BaseCallback):
                     norm_env = unwrap_vec_normalize(self.training_env)
                     if norm_env: norm_env.save(hof_vec_path)
                     self.tracker.add_hof(reward, hof_path)
-                    print(f"🌟 [HALL OF FAME] New Record! Score: {reward:.1f} saved to gallery.")
+                    print(f"[HALL OF FAME] New Record! Score: {reward:.1f} saved to gallery.")
 
                 self.tracker.update(reward, floor)
                 timestamp = datetime.datetime.now().strftime("%H:%M:%S")
@@ -279,7 +261,7 @@ class PhaseManagerCallback(BaseCallback):
         self.eval_env, self.eval_freq_global, self.tracker, self.n_eval_episodes = eval_env, eval_freq_global, tracker, n_eval_episodes
         self.state_file = state_file or os.path.join(CHECKPOINT_DIR, "cluster_state.json")
         self.phase_idx, self.last_eval_step, self.best_mean_reward, self.consecutive_regressions = 1, 0, -1000.0, 0
-        self.consecutive_failures = 0 # Track demotion trigger
+        self.consecutive_failures = 0 
         self._load_state()
 
     def set_eval_freq(self, new_freq):
@@ -307,7 +289,6 @@ class PhaseManagerCallback(BaseCallback):
 
     def _on_training_start(self): 
         self._apply_phase()
-        # Initial check to catch up if resumed past a threshold
         self._on_step()
 
     def _apply_phase(self):
@@ -319,7 +300,6 @@ class PhaseManagerCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         current_step = self.model.num_timesteps
-        # Sync step to all training environments for reboot logging
         self.training_env.env_method("set_global_step", current_step)
         return True
 
@@ -333,7 +313,6 @@ class PhaseManagerCallback(BaseCallback):
         self.last_eval_step = (current_step // self.eval_freq_global) * self.eval_freq_global
         self.save_state()
         
-        # --- GUARANTEED MILESTONE CHECKPOINT (Save Before Exam) ---
         model_path = os.path.join(CHECKPOINT_DIR, f"sts2_mid_run_step_{current_step}.zip")
         vec_path = model_path.replace(".zip", ".pkl")
         self.model.save(model_path)
@@ -341,7 +320,6 @@ class PhaseManagerCallback(BaseCallback):
         if norm_env: norm_env.save(vec_path)
         print(f"\n[CHECKPOINT] Updated Brain Secured at Step {current_step:,}")
         
-        # Rotate: Keep only latest 3 milestone pairs
         all_zips = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "sts2_mid_run_step_*.zip")), key=os.path.getmtime)
         while len(all_zips) > 3:
             oldest_zip = all_zips.pop(0)
@@ -352,8 +330,8 @@ class PhaseManagerCallback(BaseCallback):
             except: pass
         
         print(f"\n\n{'='*60}")
-        print(f"🏆 [EXAM] MILESTONE REACHED: {current_step:,} steps")
-        print(f"🏆 Starting Deterministic Skills Test on Port {EVAL_PORT}...")
+        print(f"[EXAM] MILESTONE REACHED: {current_step:,} steps")
+        print(f"[EXAM] Starting Deterministic Skills Test on Port {EVAL_PORT}...")
         print(f"{'='*60}\n")
 
         total_rewards, total_floors, total_lengths = [], [], []
@@ -385,7 +363,6 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Mastery Thresholds
         promo_reward_targets = {1: 15.0, 2: 40.0, 3: 80.0}
         promo_floor_targets = {1: 12.0, 2: 28.0, 3: 45.0}
         exam_win_floors = {1: 17, 2: 34, 3: 51, 4: 51}
@@ -396,7 +373,6 @@ class PhaseManagerCallback(BaseCallback):
         print(f"\n[EXAM] Mean Reward: {mean_reward_final:.2f} | Mean Floor: {mean_floor:.1f}")
         print(f"[EXAM] Successes: {wins}/{self.n_eval_episodes} hit target Floor {target_win_floor}")
         
-        # --- LATEST EXAM STATS FILE ---
         latest_stats_path = os.path.join(LOG_DIR, f"latest_exam_stats_step_{current_step}.txt")
         with open(latest_stats_path, "w") as f:
             f.write(f"=========================================\n")
@@ -414,13 +390,11 @@ class PhaseManagerCallback(BaseCallback):
             f.write(f"Lowest Score: {np.min(total_rewards):.2f}\n")
             f.write(f"=========================================\n")
         
-        # Rotate Latest Exam Files (Keep 3)
         all_latest = sorted(glob.glob(os.path.join(LOG_DIR, "latest_exam_stats_step_*.txt")), key=os.path.getmtime)
         while len(all_latest) > 3:
             try: os.remove(all_latest.pop(0))
             except: pass
 
-        # Update Biography Log
         best_bio_path = os.path.join(LOG_DIR, "best_model_details.json")
         with open(best_bio_path, "w") as bio_f:
             json.dump({
@@ -438,7 +412,6 @@ class PhaseManagerCallback(BaseCallback):
                 "success_rate": f"{wins}/{self.n_eval_episodes}"
             }, bio_f, indent=4)
         
-        # --- EXAM PROGRESSION LOG (CSV) ---
         prog_log_path = os.path.join(LOG_DIR, "exam_progression_log.csv")
         prog_data = {
             "step": [current_step],
@@ -454,7 +427,6 @@ class PhaseManagerCallback(BaseCallback):
         else:
             df_new.to_csv(prog_log_path, mode='a', header=False, index=False)
         
-        # --- TOP 3 MODELS GALLERY ---
         top_log_path = os.path.join(TOP_MODELS_DIR, "top_models_log.json")
         top_entries = []
         if os.path.exists(top_log_path):
@@ -462,7 +434,6 @@ class PhaseManagerCallback(BaseCallback):
                 with open(top_log_path, "r") as f: top_entries = json.load(f)
             except: pass
         
-        # Check if current mean_reward makes the cut
         top_entries.append({
             "mean_reward": float(mean_reward_final),
             "mean_floor": float(mean_floor),
@@ -476,7 +447,6 @@ class PhaseManagerCallback(BaseCallback):
         
         with open(top_log_path, "w") as f: json.dump(top_entries, f, indent=4)
         
-        # If current model is in top_entries, save it with a rank-based name
         for rank, entry in enumerate(top_entries, 1):
             if entry["id"] == f"step_{current_step}_phase_{self.phase_idx}":
                 rank_model_path = os.path.join(TOP_MODELS_DIR, f"model_rank_{rank}_step_{current_step}_phase_{self.phase_idx}.zip")
@@ -502,7 +472,6 @@ class PhaseManagerCallback(BaseCallback):
                         f.write(f"Run {i+1}: Floor {f_val} | Reward {r:.1f}\n")
                     f.write(f"=========================================\n")
                 
-                # Cleanup old rank files for THIS rank if they don't match the new one
                 for f in glob.glob(os.path.join(TOP_MODELS_DIR, f"*_rank_{rank}_*")):
                     if entry["id"] not in f:
                         try: os.remove(f)
@@ -538,31 +507,26 @@ class PhaseManagerCallback(BaseCallback):
         else:
             self.consecutive_regressions += 1
 
-        # --- PROMOTION LOGIC ---
         r_target = promo_reward_targets.get(self.phase_idx, 999)
         f_target = promo_floor_targets.get(self.phase_idx, 999)
         
         if mean_reward_final >= r_target and mean_floor >= f_target and self.phase_idx < 4:
             self.phase_idx += 1
-            print(f"\n🌟 [PROMOTION] Mastery achieved! Advancing to Phase {self.phase_idx}!\n")
+            print(f"\n[PROMOTION] Mastery achieved! Advancing to Phase {self.phase_idx}!\n")
             print(f"  > Req: Reward {r_target:.1f}, Floor {f_target:.1f}")
             print(f"  > Got: Reward {mean_reward_final:.1f}, Floor {mean_floor:.1f}")
             self.consecutive_failures = 0
             self._apply_phase()
         else:
-            # Check for Demotion (Step-Down Recovery)
-            # If in Phase > 1 and mean_floor is significantly below the CURRENT phase target
             if self.phase_idx > 1:
-                # If we are 3 floors below the floor target that got us HERE, we might be over-extended
-                # Alternatively, if success rate is 0% for 3 exams
                 if wins == 0: self.consecutive_failures += 1
                 else: self.consecutive_failures = 0
 
                 if self.consecutive_failures >= 3:
                     self.phase_idx -= 1
-                    print(f"\n📉 [DEMOTION] Performance Stall Detected. Stepping down to Phase {self.phase_idx}...")
+                    print(f"\n[DEMOTION] Performance Stall Detected. Stepping down to Phase {self.phase_idx}...")
                     self.consecutive_failures = 0
-                    self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 5.0 # Reset best reward to allow growth
+                    self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 5.0 
                     self._apply_phase()
         
         self.save_state()
@@ -570,7 +534,6 @@ class PhaseManagerCallback(BaseCallback):
 
 def get_newest_model_and_vec():
     all_zips = []
-    # Exhaustive search: find the absolute newest zip in any model or checkpoint folder
     for root, _, files in os.walk(MODEL_DIR):
         for f in files:
             if f.endswith(".zip"):
@@ -585,13 +548,10 @@ def get_newest_model_and_vec():
     latest_model = max(all_zips, key=os.path.getmtime)
     print(f"[SWEEPER] Resuming from absolute newest file: {latest_model}")
     
-    # Standardized Partner Logic: Check for a .pkl with the exact same name
     vec_path = latest_model.replace(".zip", ".pkl")
     if os.path.exists(vec_path):
         return latest_model, vec_path
     
-    # Fallback model loading logic
-    print(f"[SWEEPER] Warning: Exact partner .pkl not found. Checking for emergency/best defaults...")
     dirname = os.path.dirname(latest_model)
     emergency_pkl = os.path.join(dirname, "sts2_emergency_save.pkl")
     best_pkl = os.path.join(dirname, "vec_normalize_best.pkl")
@@ -610,17 +570,14 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
         "vf_coef": 0.7, "policy_kwargs": policy_kwargs
     }
     
-    # If resuming within the SAME buffer stage, load the full model including optimizer state
     if weights_path and os.path.exists(weights_path):
         try:
             print(f"[LOAD] Attempting to resume full model state from {weights_path}...")
-            # Load the model without changing parameters if possible to keep optimizer state
             model = MaskablePPO.load(weights_path, env=env, n_steps=n_steps, batch_size=batch_size)
             print(f"[LOAD] Success! Full model state (including Optimizer) restored.")
             return model
         except Exception as e:
             print(f"[LOAD] Partial load fallback (Parameters mismatch or error): {e}")
-            # Fallback: Create fresh but copy weights (Loses optimizer state but keeps learning)
             new_model = MaskablePPO(**model_params)
             old = MaskablePPO.load(weights_path)
             new_model.set_parameters(old.get_parameters())
@@ -634,7 +591,6 @@ def make_env(port, is_eval=False):
         node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
         base_path = f"C:\\Program Files (x86)\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
         data_dir = f"Node{node_id}_Data"
-        # Initialize environment using the provided base path
         base_env = SlayTheSpire2Env(port=port, game_path=base_path, user_data_dir=data_dir, force_fresh=False, is_eval=is_eval)
         env = ActionMasker(base_env, lambda e: e.action_masks())
         return Monitor(env, os.path.join(LOG_DIR, f"monitor_{port}_{SESSION_ID}.csv"), info_keywords=("floor",))
@@ -661,11 +617,9 @@ def main():
     eval_env = setup_vec_env(ports=[EVAL_PORT], vec_path=latest_vec_path, is_eval=True)
     tracker = GlobalPerformanceTracker()
     metrics_cb = TensorboardMetricsCallback(tracker)
-    # Determine the correct starting stage parameters if resuming
     start_n_steps, start_batch_size = BUFFER_STAGES[0][0], BUFFER_STAGES[0][1]
     if current_model_file:
         try:
-            # Peak inside the zip to find the internal step count
             temp_model = MaskablePPO.load(current_model_file)
             current_steps = temp_model.num_timesteps
             del temp_model
@@ -678,22 +632,19 @@ def main():
     model = None
     try:
         for n_steps, batch_size, stage_end in BUFFER_STAGES:
-            eval_freq_global = n_steps * len(TRAIN_PORTS) # Exam after every single brain update
-            if stage_end == 18_432: # Warmup phase: 18,432 steps
+            eval_freq_global = n_steps * len(TRAIN_PORTS) 
+            if stage_end == 18_432: 
                 eval_freq_global *= 2
             
             phase_cb = PhaseManagerCallback(eval_env, eval_freq_global, tracker, n_eval_episodes=10)
             
             if model is None: 
-                # Use the pre-determined steps to avoid a double-load/transition
                 model = create_fresh_model(train_env, start_n_steps, start_batch_size, current_model_file)
                 synchronize_logs(model.num_timesteps)
             
-            # If the loaded model's steps are beyond this stage, skip it
             if model.num_timesteps >= stage_end: 
                 continue
 
-            # If the current stage requires a different buffer size than what's loaded
             if model.n_steps != n_steps:
                 tmp_path = os.path.join(CHECKPOINT_DIR, "transition_temp.zip")
                 tmp_vec = os.path.join(CHECKPOINT_DIR, "transition_temp.pkl")
@@ -704,14 +655,12 @@ def main():
                 model.set_logger(new_logger)
                 synchronize_logs(model.num_timesteps)
                 
-                # Cleanup handoff files once successfully loaded into the new brain
                 try:
                     if os.path.exists(tmp_path): os.remove(tmp_path)
                     if os.path.exists(tmp_vec): os.remove(tmp_vec)
                     print(f"[SYSTEM] Stage Handoff Successful. Transition files purged.")
                 except: pass
             
-            # THE CRITICAL TRAINING LOOP
             model.learn(
                 total_timesteps=(stage_end - model.num_timesteps), 
                 callback=CallbackList([metrics_cb, phase_cb, CustomProgressBarCallback(stage_end, phase_cb, tracker)]), 
@@ -719,9 +668,6 @@ def main():
                 progress_bar=False
             )
 
-            # --- STAGE TRANSITION FAILSAFE ---
-            # If the learn block ended exactly on an exam milestone, SB3 skips the _on_rollout_start
-            # callback because a new rollout isn't started. We manually trigger the exam here.
             if model.num_timesteps >= phase_cb.last_eval_step + phase_cb.eval_freq_global:
                 phase_cb._run_exam()
     except (KeyboardInterrupt, Exception) as e:

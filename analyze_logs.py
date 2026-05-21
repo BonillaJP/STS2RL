@@ -36,14 +36,12 @@ def read_csv_safe(path, skip_header=True):
 
 def generate_report():
     print(f"\n{'='*70}")
-    print(f"       Slay the Spire 2 - MASTER TELEMETRY GUIDE (v2.0)")
+    print(f"       Slay the Spire 2 - MASTER TELEMETRY GUIDE")
     print(f"       Report Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*70}\n")
 
-    # --- PART 1: TRAINING TELEMETRY (Learning Cluster) ---
     print("### PART 1: TRAINING TELEMETRY (Learning Cluster)")
     
-    # 1.1 Monitor Aggregation
     mon_files = glob.glob(MONITOR_PATTERN)
     train_ports = ["15526", "15527", "15528"]
     train_files = [f for f in mon_files if any(p in f for p in train_ports)]
@@ -65,11 +63,10 @@ def generate_report():
             q1 = df_train.iloc[:q_size]['r'].mean()
             q4 = df_train.iloc[-q_size:]['r'].mean()
             delta = q4 - q1
-            print(f"- Trend (Q1 vs Q4): {q1:.2f} \u2794 {q4:.2f} ({'📈' if delta > 0 else '📉'} {delta:+.2f} Delta)")
+            print(f"- Trend (Q1 vs Q4): {q1:.2f} -> {q4:.2f} ({'[UP]' if delta > 0 else '[DOWN]'} {delta:+.2f} Delta)")
     else:
         print("- Stats: No training data found in monitor logs.")
 
-    # 1.2 Technical SB3 Metrics
     df_prog = read_csv_safe(PROGRESS_CSV, skip_header=False)
     if not df_prog.empty:
         latest = df_prog.iloc[-1]
@@ -80,7 +77,6 @@ def generate_report():
     else:
         print("- Technical Health: sb3_tech/progress.csv is currently empty (New Rollout).")
 
-    # --- PART 2: EVALUATION TELEMETRY (Mastery Exams) ---
     print("\n### PART 2: EVALUATION TELEMETRY (Mastery Exams)")
     
     if os.path.exists(BEST_MODEL_JSON):
@@ -98,19 +94,16 @@ def generate_report():
     else:
         print("- Latest Exams: No historical exam data found.")
 
-    # --- PART 3: STATUS FLAGS & ORCHESTRATION ---
     print("\n### PART 3: STATUS FLAGS & ORCHESTRATION")
     
-    # Flags based on recent performance
     if train_dfs and not all(df.empty for df in train_dfs):
         recent_20 = df_train.tail(20)
         stalling = recent_20['l'].mean() > 1000 and recent_20['floor'].mean() < 5
-        print(f"- \u2705 GREEN FLAGS: {'Staircase Reward Trend' if delta > 0 else 'Stable Baseline'}")
-        if stalling: print("- \u26a0\ufe0f RED FLAG: Potential Stalling detected (High length / Low floor).")
+        print(f"- [STATUS]: {'[UP] Staircase Reward Trend' if delta > 0 else '[OK] Stable Baseline'}")
+        if stalling: print("- [WARNING]: Potential Stalling detected (High length / Low floor).")
     
     print("- Orchestrator: Master Log Consolidation active. Data Isolation confirmed.")
 
-    # --- PART 4: CLUSTER STABILITY (Node Recovery) ---
     print("\n### PART 4: CLUSTER STABILITY (Node Recovery)")
     
     df_reboot = read_csv_safe(REBOOT_LOG, skip_header=False)
