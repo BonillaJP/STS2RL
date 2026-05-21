@@ -48,6 +48,11 @@ Because Steam normally restricts running multiple instances of a game, the follo
 3.  **Differentiate Processes:** To allow the Python orchestrator to kill and restart specific frozen nodes independently, rename the game executable and its associated data file in each folder (e.g., rename `SlayTheSpire2.exe` and `SlayTheSpire2.pck` to `Node 1.exe` and `Node 1.pck`, `Node 2.exe`, etc.).
 4.  **Configure the API Mod:** Install the STS2MCP mod into each folder. Open the mod's `.conf` file in each respective folder and assign their unique ports.
 
+### ⚠️ Storage Caution (Godot Engine Logs)
+Slay the Spire 2 is powered by the Godot engine, which generates detailed debug logs in the system's `AppData` directory. Because the RL agent operates at high speeds across multiple nodes, these logs can grow extremely fast (often exceeding **50GB+** in a single training session).
+
+To mitigate this, an automated **`_vacuum_disk`** utility is integrated into `sts2_env.py`. This utility forcefully clears the game's log and crash-report directories (`%APPDATA%\SlayTheSpire2\logs\`) every time an environment node initializes or reboots. Users should be aware that significant disk space may be temporarily consumed between reboots.
+
 ## ⚙️ Technical Deep Dive
 
 ### The State Observation Vector

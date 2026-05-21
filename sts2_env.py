@@ -154,23 +154,16 @@ class SlayTheSpire2Env(gym.Env):
         except: pass
 
     def _vacuum_disk(self):
+        # Forcefully clear engine logs and telemetry to prevent storage bloat
         appdata = os.getenv('APPDATA')
         if appdata:
             game_data_path = os.path.join(appdata, "SlayTheSpire2")
-            log_dir = os.path.join(game_data_path, "logs")
-            try:
-                if os.path.exists(log_dir):
-                    for log_file in glob.glob(os.path.join(log_dir, "godot*.log")):
-                        if "godot.log" not in log_file:
-                            os.remove(log_file)
-            except: pass
-            
-            sentry_dir = os.path.join(game_data_path, "sentry", "reports")
-            try:
-                if os.path.exists(sentry_dir):
-                    for dmp in glob.glob(os.path.join(sentry_dir, "*.dmp")):
-                        os.remove(dmp)
-            except: pass
+            for sub in [os.path.join(game_data_path, "logs"), os.path.join(game_data_path, "sentry", "reports")]:
+                try:
+                    if os.path.exists(sub):
+                        for f in glob.glob(os.path.join(sub, "*")):
+                            if os.path.isfile(f): os.remove(f)
+                except: pass
 
     def _reboot_game_client(self, reason=None):
         print(f"\n[REBOOT] Port {self.port} is frozen. physically restarting Node...")
