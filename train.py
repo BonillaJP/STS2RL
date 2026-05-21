@@ -365,8 +365,8 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Mastery Thresholds (Recalibrated for Bounty Economy)
-        promo_reward_targets = {1: 100.0, 2: 250.0, 3: 450.0}
+        # Mastery Thresholds
+        promo_reward_targets = {1: 50.0, 2: 150.0, 3: 300.0}
         promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0}
         exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51}
         

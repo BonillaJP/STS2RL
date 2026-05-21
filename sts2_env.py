@@ -389,7 +389,7 @@ class SlayTheSpire2Env(gym.Env):
                     mask[act_idx] = False 
 
         if not mask.any():
-            if screen in ["monster", "elite", "boss"]: mask[80] = True
+            if screen in ["monster", "elite", "boss", "combat"]: mask[80] = True
             elif screen not in ["map", "event", "hand_select", "neow"]: mask[123] = True
         return mask
 
@@ -669,13 +669,14 @@ class SlayTheSpire2Env(gym.Env):
         if new_state.get("run", {}).get("is_victory", False): floor_now = 51
         player_now, reward, terminated = new_state.get("player", {}), 0.0, False
         p = self.training_phase
-        f_b, b_b, e_b, s_b, hp_m = {1:(2.5,100.0,25.0,10.0,0.1), 2:(5.0,150.0,45.0,20.0,0.2), 3:(7.5,200.0,70.0,30.0,0.3)}.get(p, (10.0,300.0,100.0,50.0,0.5))
+        f_b, b_b, e_b, s_b = {1:(2.5,100.0,25.0,10.0), 2:(5.0,150.0,45.0,20.0), 3:(7.5,200.0,70.0,30.0)}.get(p, (10.0,300.0,100.0,50.0))
+        hp_m = 0.5
         
         if self.last_prog_screen == "elite" and new_screen == "rewards": self.pending_elite_bounty = True
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
         if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
 
-        reward -= 0.10 
+        reward -= 0.01 
         if self.stagnant_steps > 50: reward -= 20.0
         elif self.stagnant_steps > 30: reward -= 5.0
         elif self.stagnant_steps > 15: reward -= 2.0
@@ -694,17 +695,28 @@ class SlayTheSpire2Env(gym.Env):
             elif e_hp < self.lowest_enemy_hp_seen[e_id]: reward += (self.lowest_enemy_hp_seen[e_id] - e_hp) * 0.05; self.lowest_enemy_hp_seen[e_id] = e_hp
         
         curr_hp_sum = sum(e.get("hp", 0) for e in enemies_now) + player_now.get("hp", 0)
-        prog = (floor_now != self.last_prog_floor or curr_hp_sum != self.last_prog_hp_sum or player_now.get("gold", 0) != self.last_prog_gold)
+        prog = (floor_now != self.last_prog_floor or 
+                curr_hp_sum != self.last_prog_hp_sum or 
+                player_now.get("gold", 0) != self.last_prog_gold or
+                player_now.get("block", 0) != self.last_prog_player_block or
+                player_now.get("energy", 0) != self.last_prog_energy)
+        
         if prog: self.stagnant_steps = 0
         else: self.stagnant_steps += 1
         
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = new_screen, floor_now, curr_hp_sum, player_now.get("gold", 0)
+        self.last_prog_player_block = player_now.get("block", 0)
+        self.last_prog_energy = player_now.get("energy", 0)
 
         if self.total_episode_steps >= 1500:
             self.reboot_reason = "Timeout (1500 Steps)"; self.needs_reboot = True
             return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
         
-        if new_screen == "game_over" or floor_now == 51: terminated = True
+        if new_screen == "game_over":
+            reward -= 50.0
+            terminated = True
+        elif floor_now == 51:
+            terminated = True
         self.current_state = new_state
         return obs, reward * (2.0 if floor_now >= 45 else 1.0), terminated, False, {"floor": floor_now}
 
@@ -716,5 +728,6 @@ class SlayTheSpire2Env(gym.Env):
         self.previous_floor, self.previous_hp = state.get("run", {}).get("floor", 0), state.get("player", {}).get("hp", 0)
         self.combat_step_count, self.total_episode_steps, self.stagnant_steps = 0, 0, 0
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = "none", -1, -1, -1
+        self.last_prog_energy, self.last_prog_player_block = -1, -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
         self.lowest_enemy_hp_seen = {}; return self._flatten_state(state), {}

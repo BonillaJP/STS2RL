@@ -88,17 +88,18 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 ### The Reward System (Master Class Telemetry)
 A highly specialized, multi-layered reward system was designed to balance short-term survival with long-term scaling:
 
-*   **Step Tax (`-0.10`):** A flat penalty applied to every single action. 
-*   **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops (e.g., repeatedly skipping rewards), the environment implements a compounding penalty based on consecutive stagnant steps:
+*   **Step Tax (`-0.01`):** A minimal flat penalty applied to every single action. This allows the agent to safely scale in long Ascension 8+ fights without mathematical bankruptcy.
+*   **Death Penalty (`-50.0`):** A massive flat penalty applied upon reaching the game over screen. Because normal play is now net-positive (`+2.0`), this penalty is sufficient to discourage suicide without causing Value Scale Divergence.
+*   **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps. **Note:** Progress is now tracked via changes in Floor, HP, Gold, **Block**, and **Energy**, ensuring defensive play is not erroneously punished.
     *   **15+ steps:** `-2.0` penalty per action.
     *   **30+ steps:** `-5.0` penalty per action.
     *   **50+ steps:** `-20.0` penalty per action.
-*   **HP Delta:** Dynamic rewards (`+0.05` per enemy HP damage dealt) and penalties based on the agent's health lost. 
-*   **The Phase Bounty Matrix:** Massive point spikes awarded for crucial game milestones. 
-    *   *Phase 1:* Floor (+2.5), Boss (+100.0), Elite (+25.0), Smith (+10.0), HP Multiplier (x0.1)
-    *   *Phase 2:* Floor (+5.0), Boss (+150.0), Elite (+45.0), Smith (+20.0), HP Multiplier (x0.2)
-    *   *Phase 3:* Floor (+7.5), Boss (+200.0), Elite (+70.0), Smith (+30.0), HP Multiplier (x0.3)
-    *   *Phase 4:* Floor (+10.0), Boss (+300.0), Elite (+100.0), Smith (+50.0), HP Multiplier (x0.5)
+*   **HP Delta:** Dynamic rewards (`+0.05` per enemy HP damage dealt) and a locked **0.5x** multiplier for player HP lost. This forces the agent to value its own life 10x more than enemy damage, preparing it for the limited healing of Ascension 2+.
+*   **The Phase Bounty Matrix:** Massive point spikes awarded for crucial game milestones: 
+    *   *Phase 1:* Floor (+2.5), Boss (+100.0), Elite (+25.0), Smith (+10.0)
+    *   *Phase 2:* Floor (+5.0), Boss (+150.0), Elite (+45.0), Smith (+20.0)
+    *   *Phase 3:* Floor (+7.5), Boss (+200.0), Elite (+70.0), Smith (+30.0)
+    *   *Phase 4:* Floor (+10.0), Boss (+300.0), Elite (+100.0), Smith (+50.0)
 
 **Design Rationale:**
 In early iterations, the agent suffered from "superstitious learning" (e.g., repeating useless actions) or simply surviving without getting stronger. Implementing a strict Step Tax forces the agent to act efficiently. Scaling up the Bounty Matrix in later phases forces the agent to actively hunt Elites and prioritize Campfire Smithing, which are mathematically necessary to survive high Ascensions.
