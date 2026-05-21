@@ -89,6 +89,10 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 A highly specialized, multi-layered reward system was designed to balance short-term survival with long-term scaling:
 
 *   **Step Tax (`-0.10`):** A flat penalty applied to every single action. 
+*   **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops (e.g., repeatedly skipping rewards), the environment implements a compounding penalty based on consecutive stagnant steps:
+    *   **15+ steps:** `-2.0` penalty per action.
+    *   **30+ steps:** `-5.0` penalty per action.
+    *   **50+ steps:** `-20.0` penalty per action.
 *   **HP Delta:** Dynamic rewards (`+0.05` per enemy HP damage dealt) and penalties based on the agent's health lost. 
 *   **The Phase Bounty Matrix:** Massive point spikes awarded for crucial game milestones. 
     *   *Phase 1:* Floor (+2.5), Boss (+100.0), Elite (+25.0), Smith (+10.0), HP Multiplier (x0.1)

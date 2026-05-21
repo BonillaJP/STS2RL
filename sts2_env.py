@@ -676,6 +676,9 @@ class SlayTheSpire2Env(gym.Env):
         if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
 
         reward -= 0.10 
+        if self.stagnant_steps > 50: reward -= 20.0
+        elif self.stagnant_steps > 30: reward -= 5.0
+        elif self.stagnant_steps > 15: reward -= 2.0
         if floor_now > self.previous_floor:
             reward += f_b
             if self.pending_boss_bounty: reward += b_b; self.pending_boss_bounty = False
