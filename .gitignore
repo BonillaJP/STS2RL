@@ -1,3 +1,14 @@
+# Files
+logs/
+models/
+checkpoints/
+tensorboard/
+references/
+*.zip
+*.pt
+*.pth
+*.bat
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
