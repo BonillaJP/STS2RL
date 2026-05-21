@@ -642,7 +642,7 @@ class SlayTheSpire2Env(gym.Env):
             time.sleep(0.05); new_state = self._raw_state()
             if not new_state: 
                 self.reboot_reason = "API/State Invalid"
-                self.needs_reboot = True; return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
+                self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
         new_hash = stable_hash(json.dumps(new_state, sort_keys=True))
         if new_hash == self.last_state_hash:
