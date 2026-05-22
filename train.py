@@ -681,6 +681,17 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
 def main():
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
     
+    # Global Log Nuke (STS2 engine logs)
+    appdata = os.getenv('APPDATA')
+    if appdata:
+        game_logs_path = os.path.join(appdata, "SlayTheSpire2", "logs")
+        if os.path.exists(game_logs_path):
+            print(f"[SYSTEM] Nuking engine logs: {game_logs_path}")
+            for f in glob.glob(os.path.join(game_logs_path, "*")):
+                try: 
+                    if os.path.isfile(f): os.remove(f)
+                except: pass
+
     # Initialize Console Mirror
     console_log_path = os.path.join(LOG_DIR, "train_console.log")
     sys.stdout = TeeLogger(console_log_path, mode="a")

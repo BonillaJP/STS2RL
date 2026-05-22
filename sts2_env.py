@@ -100,7 +100,7 @@ class SlayTheSpire2Env(gym.Env):
         self.global_step = 0
         self.last_state_hash = ""
         self.state_action_counts = {} 
-        self._vacuum_disk()
+        self._vacuum_disk(full_nuke=True)
         
         self.trace_path = f"logs/node_trace_{self.port}.jsonl"
         try: 
@@ -154,7 +154,7 @@ class SlayTheSpire2Env(gym.Env):
                 f.writelines(lines)
         except: pass
 
-    def _vacuum_disk(self):
+    def _vacuum_disk(self, full_nuke=True):
         # Forcefully clear engine logs and telemetry to prevent storage bloat
         appdata = os.getenv('APPDATA')
         if appdata:
@@ -163,7 +163,10 @@ class SlayTheSpire2Env(gym.Env):
                 try:
                     if os.path.exists(sub):
                         for f in glob.glob(os.path.join(sub, "*")):
-                            if os.path.isfile(f): os.remove(f)
+                            if os.path.isfile(f):
+                                if not full_nuke and os.path.basename(f).lower() == "godot.log":
+                                    continue
+                                os.remove(f)
                 except: pass
 
     def _reboot_game_client(self, reason=None):
@@ -202,7 +205,7 @@ class SlayTheSpire2Env(gym.Env):
         log_reason = reason if reason else self.reboot_reason
         self._log_reboot(log_reason, pid=target_pid)
         self.reboot_reason = "Stall/Deadlock Recovery"
-        self._vacuum_disk()
+        self._vacuum_disk(full_nuke=False)
 
         print(f"[REBOOT] Waiting for Port {self.port} to be released...")
         for _ in range(30):
