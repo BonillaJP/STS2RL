@@ -670,7 +670,17 @@ class SlayTheSpire2Env(gym.Env):
         player_now, reward, terminated = new_state.get("player", {}), 0.0, False
         p = self.training_phase
         f_b, b_b, e_b, s_b = {1:(2.5,100.0,25.0,10.0), 2:(5.0,150.0,45.0,20.0), 3:(7.5,200.0,70.0,30.0)}.get(p, (10.0,300.0,100.0,50.0))
-        hp_m = 0.5
+        
+        hp_before, hp_after = self.previous_hp, player_now.get("hp", 0)
+        max_hp = max(player_now.get("max_hp", 1), 1)
+        hp_ratio = hp_before / max_hp
+        hp_delta = hp_after - hp_before
+
+        if hp_ratio > 0.9: s_m = 1.5
+        elif hp_ratio > 0.8: s_m = 1.2
+        elif hp_ratio > 0.5: s_m = 1.0
+        elif hp_ratio > 0.3: s_m = 0.2
+        else: s_m = -2.0
         
         if self.last_prog_screen == "elite" and new_screen == "rewards": self.pending_elite_bounty = True
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
@@ -684,10 +694,19 @@ class SlayTheSpire2Env(gym.Env):
             reward += f_b
             if self.pending_boss_bounty: reward += b_b; self.pending_boss_bounty = False
             if self.pending_elite_bounty: reward += e_b; self.pending_elite_bounty = False
-            if self.pending_smith_bounty: reward += s_b; self.pending_smith_bounty = False
+            if self.pending_smith_bounty: reward += (s_b * s_m); self.pending_smith_bounty = False
             self.previous_floor = floor_now
             
-        reward += (player_now.get("hp", 0) - self.previous_hp) * hp_m; self.previous_hp = player_now.get("hp", 0)
+        if hp_delta > 0:
+            if hp_ratio > 0.9: reward += hp_delta * -0.5
+            elif hp_ratio > 0.8: pass
+            elif hp_ratio > 0.5: reward += hp_delta * 0.5
+            elif hp_ratio > 0.3: reward += hp_delta * 1.5
+            else: reward += hp_delta * 4.0
+        elif hp_delta < 0:
+            reward += hp_delta * 0.5
+        
+        self.previous_hp = hp_after
         enemies_now = new_state.get("battle", {}).get("enemies", [])
         for e in enemies_now:
             e_id, e_hp = e.get("entity_id"), e.get("hp", 0)

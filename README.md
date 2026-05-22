@@ -94,12 +94,18 @@ A highly specialized, multi-layered reward system was designed to balance short-
     *   **15+ steps:** `-2.0` penalty per action.
     *   **30+ steps:** `-5.0` penalty per action.
     *   **50+ steps:** `-20.0` penalty per action.
-*   **HP Delta:** Dynamic rewards (`+0.05` per enemy HP damage dealt) and a locked **0.5x** multiplier for player HP lost. This forces the agent to value its own life 10x more than enemy damage, preparing it for the limited healing of Ascension 2+.
-*   **The Phase Bounty Matrix:** Massive point spikes awarded for crucial game milestones: 
-    *   *Phase 1:* Floor (+2.5), Boss (+100.0), Elite (+25.0), Smith (+10.0)
-    *   *Phase 2:* Floor (+5.0), Boss (+150.0), Elite (+45.0), Smith (+20.0)
-    *   *Phase 3:* Floor (+7.5), Boss (+200.0), Elite (+70.0), Smith (+30.0)
-    *   *Phase 4:* Floor (+10.0), Boss (+300.0), Elite (+100.0), Smith (+50.0)
+*   **Dynamic Survival Instinct (Campfires):** To mirror human risk assessment, healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**:
+    *   **Ratio > 90%:** Healing is penalized (**-0.5x**), Smithing is boosted (**1.5x**).
+    *   **Ratio 80-90%:** Healing is neutral (**0.0x**), Smithing is encouraged (**1.2x**).
+    *   **Ratio 50-80%:** Standard operation (**0.5x** Heal, **1.0x** Smith).
+    *   **Ratio 30-50%:** Healing is prioritized (**1.5x**), Smithing is discouraged (**0.2x**).
+    *   **Ratio < 30%:** Healing is vital (**4.0x**), Smithing is heavily penalized (**-2.0x**).
+*   **HP Delta (Combat):** Dynamic rewards (`+0.05` per enemy HP damage dealt) and a locked **0.5x** penalty multiplier for player HP lost in combat. This prevents "glass cannon" suicide runs.
+*   **The Phase Bounty Matrix:** Base point spikes awarded for crucial game milestones. Note that **Smithing** values below are base values modified by the Survival Instinct multiplier: 
+    *   *Phase 1:* Floor (+2.5), Boss (+100.0), Elite (+25.0), Smith (+10.0 Base)
+    *   *Phase 2:* Floor (+5.0), Boss (+150.0), Elite (+45.0), Smith (+20.0 Base)
+    *   *Phase 3:* Floor (+7.5), Boss (+200.0), Elite (+70.0), Smith (+30.0 Base)
+    *   *Phase 4:* Floor (+10.0), Boss (+300.0), Elite (+100.0), Smith (+50.0 Base)
 
 **Design Rationale:**
 In early iterations, the agent suffered from "superstitious learning" (e.g., repeating useless actions) or simply surviving without getting stronger. Implementing a strict Step Tax forces the agent to act efficiently. Scaling up the Bounty Matrix in later phases forces the agent to actively hunt Elites and prioritize Campfire Smithing, which are mathematically necessary to survive high Ascensions.
