@@ -89,9 +89,10 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum = "none", -1, -1
         self.last_prog_gold = -1
         self.last_prog_energy = -1
-        self.last_prog_player_block = -1
+        self.last_prog_deck_size = -1
         self.last_prog_enemy_block_sum = -1
         self.last_prog_selected_cards = []
+        self.internal_selection_history = []
         
         self.pending_elite_bounty = False
         self.pending_boss_bounty = False
@@ -224,6 +225,8 @@ class SlayTheSpire2Env(gym.Env):
         time.sleep(30.0)
 
     def action_masks(self):
+        fresh_state = self._raw_state()
+        if fresh_state: self.current_state = fresh_state
         state = self.current_state
         mask = np.zeros(len(FLAT_ACTIONS), dtype=bool)
         if not state: return mask
@@ -269,13 +272,16 @@ class SlayTheSpire2Env(gym.Env):
                             for t_idx in range(min(5, len(enemies))): mask[c_idx * 5 + t_idx] = True
                         else: mask[c_idx * 5] = True
                 
-                for p_idx, potion in enumerate(potions[:5]):
+                for potion in potions[:5]:
+                    p_slot = potion.get("slot")
+                    if p_slot is None or p_slot >= 5: continue
+                    
                     can_use_flag = potion.get("can_use_in_combat")
                     if can_use_flag is None: can_use_flag = potion.get("can_afford", True)
                     if can_use_flag:
                         if potion.get("target_type") in ["AnyEnemy", "SingleTarget", "Target"]:
-                            for t_idx in range(min(5, len(enemies))): mask[50 + p_idx * 5 + t_idx] = True
-                        else: mask[50 + p_idx * 5] = True 
+                            for t_idx in range(min(5, len(enemies))): mask[50 + p_slot * 5 + t_idx] = True
+                        else: mask[50 + p_slot * 5] = True 
         elif screen == "hand_select":
             hs = state.get("hand_select", {})
             match = re.search(r'\b(\d+)\b', hs.get("prompt", ""))
@@ -311,7 +317,19 @@ class SlayTheSpire2Env(gym.Env):
             if ev.get("in_dialogue"):
                 mask[134] = True 
             else:
-                selectable = [o.get("index") for o in opts if not o.get("is_locked") and not o.get("was_chosen")]
+                cur_hp = player.get("hp", 0)
+                max_hp = max(player.get("max_hp", 1), 1)
+                hp_ratio = cur_hp / max_hp
+                
+                selectable = []
+                for o in opts:
+                    if o.get("is_locked") or o.get("was_chosen"):
+                        continue
+                    # Specific Fix for Abyssal Baths: Disable 'Linger' if HP is low
+                    if o.get("title", "").lower() == "linger" and hp_ratio < 0.3:
+                        continue
+                    selectable.append(o.get("index"))
+                
                 if selectable: set_mask(124, 10, selectable)
                 if not selectable and not ev.get("in_dialogue"): mask[123] = True
         elif screen in ["room", "unknown"]: mask[123] = True
@@ -338,25 +356,33 @@ class SlayTheSpire2Env(gym.Env):
             if "selected_card_indices" in cs: raw_sel.extend([{"index": i} for i in cs.get("selected_card_indices", [])])
             
             selected_indices = [str(c.get("index", c)) for c in raw_sel if c is not None]
-            
             if not selected_indices: 
                 selected_indices = [str(c.get("index")) for c in cs.get("cards", []) if (c.get("is_selected", False) or c.get("is_chosen", False) or c.get("selected", False) or c.get("isSelected", False) or c.get("isChosen", False))]
             
-            can_confirm = cs.get("can_confirm", False)
-            if not can_confirm:
-                valid_grid_indices = [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in selected_indices]
-                if len(selected_indices) < max_sel:
-                    set_mask(160, 25, valid_grid_indices)
+            num_selected = len(selected_indices)
+            # Grid Screens use 'can_confirm' field in API
+            is_grid = "can_confirm" in cs
             
-            is_mid_selection = (can_confirm or len(selected_indices) > 0)
-            proceed_exhausted = self.state_action_counts.get(123, 0) >= 10
-            confirm_exhausted = self.state_action_counts.get(185, 0) >= 10
-            
-            if can_confirm: mask[185] = True
+            if is_grid:
+                can_confirm = cs.get("can_confirm", False)
+                # Handle Grid Selection
+                if num_selected < max_sel:
+                    # Merge with internal memory to handle API lag
+                    merged_selected = set(selected_indices) | set(map(str, self.internal_selection_history))
+                    if len(merged_selected) < max_sel:
+                        valid_indices = [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in merged_selected]
+                        set_mask(160, 25, valid_indices)
+                
+                if can_confirm or num_selected >= max_sel:
+                    mask[185] = True
+            else:
+                # Choose Screens: select_card is terminal
+                valid_indices = [c.get("index") for c in cs.get("cards", [])]
+                set_mask(160, 25, valid_indices)
+
+            if cs.get("can_cancel"): mask[186] = True
+            # Strictly NO proceed (123) unless specifically allowed by overlay
             if cs.get("can_proceed"): mask[123] = True
-            if cs.get("can_cancel"):
-                if not is_mid_selection or (proceed_exhausted and confirm_exhausted):
-                    mask[186] = True
 
         elif screen == "bundle_select":
             bs = state.get("bundle_select", {})
@@ -388,7 +414,7 @@ class SlayTheSpire2Env(gym.Env):
 
         if not mask.any():
             if screen in ["monster", "elite", "boss", "combat"]: mask[80] = True
-            elif screen not in ["map", "event", "hand_select", "neow"]: mask[123] = True
+            elif screen not in ["map", "event", "hand_select", "neow", "card_select_overlay"]: mask[123] = True
         return mask
 
     def _post(self, payload):
@@ -643,6 +669,10 @@ class SlayTheSpire2Env(gym.Env):
                 self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
         self.state_action_counts[action_idx] = self.state_action_counts.get(action_idx, 0) + 1
+        if payload.get("action") == "select_card":
+            self.internal_selection_history.append(payload.get("index"))
+        elif payload.get("action") in ["confirm_selection", "proceed", "cancel_selection"]:
+            self.internal_selection_history = []
 
         if new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
             while new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
@@ -709,11 +739,13 @@ class SlayTheSpire2Env(gym.Env):
             elif e_hp < self.lowest_enemy_hp_seen[e_id]: reward += (self.lowest_enemy_hp_seen[e_id] - e_hp) * 0.05; self.lowest_enemy_hp_seen[e_id] = e_hp
         
         curr_hp_sum = sum(e.get("hp", 0) for e in enemies_now) + player_now.get("hp", 0)
+        deck_size = len(player_now.get("deck", []))
         prog = (floor_now != self.last_prog_floor or 
                 curr_hp_sum != self.last_prog_hp_sum or 
                 player_now.get("gold", 0) != self.last_prog_gold or
                 player_now.get("block", 0) != self.last_prog_player_block or
-                player_now.get("energy", 0) != self.last_prog_energy)
+                player_now.get("energy", 0) != self.last_prog_energy or
+                deck_size != self.last_prog_deck_size)
         
         if prog: 
             self.stagnant_steps = 0
@@ -721,9 +753,13 @@ class SlayTheSpire2Env(gym.Env):
         else: 
             self.stagnant_steps += 1
         
+        if new_screen != self.last_prog_screen:
+            self.internal_selection_history = []
+            
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = new_screen, floor_now, curr_hp_sum, player_now.get("gold", 0)
         self.last_prog_player_block = player_now.get("block", 0)
         self.last_prog_energy = player_now.get("energy", 0)
+        self.last_prog_deck_size = deck_size
 
         if self.total_episode_steps >= 1500:
             self.reboot_reason = "Timeout (1500 Steps)"; self.needs_reboot = True

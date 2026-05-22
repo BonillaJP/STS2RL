@@ -374,7 +374,7 @@ class PhaseManagerCallback(BaseCallback):
         print(f"{'='*60}\n")
 
         total_rewards, total_floors, total_lengths = [], [], []
-        eval_pbar = tqdm(total=self.n_eval_episodes, desc="[EXAM] Progress", unit="ep")
+        eval_pbar = tqdm(total=self.n_eval_episodes, desc="[EXAM] Progress", unit="ep", ascii=True)
         
         for ep in range(self.n_eval_episodes):
             obs = self.eval_env.reset()
