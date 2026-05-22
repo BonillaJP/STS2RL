@@ -74,15 +74,15 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 *   **Maskable PPO (Proximal Policy Optimization):** Standard PPO wastes millions of steps trying to click disabled buttons. By utilizing `sb3-contrib`'s MaskablePPO, the environment passes a boolean mask array of length 317 alongside every observation. The network forces the logits of invalid actions to `-infinity` before the softmax layer. This guarantees that 100% of the gradient updates are spent evaluating valid tactical choices.
 *   **Robust Multi-Card Selection:** To prevent infinite "toggle loops" where the agent unselects its first choice, the masking logic employs aggressive string-casting (`str()`) for all indices and scans for multiple API flag variations (`is_selected`, `isSelected`, `is_chosen`, `isChosen`). This ensures that once a card is selected, its action slot is immediately blocked, forcing the agent to fulfill multi-card requirements (e.g., "Choose 2") efficiently.
 *   **Synergy-CNN Vision:** Rather than treating the player's hand as a flat array of numbers, the environment extracts the hand into a 1D tensor and passes it through a 1D-Convolutional branch (`nn.Conv1d`).
-    *   *Technical Implementation:* It sweeps a `kernel_size=3` over the hand's feature channels (cost, exhaust flags, damage values, enchants). This allows the network to natively detect spatial synergies—such as a zero-cost card sitting next to a high-damage card, or overlapping enchantments—before feeding the flattened spatial data into the fully connected `[256, 256]` policy layers.
+    *   *Technical Implementation:* It sweeps a `kernel_size=3` over the hand's feature channels (cost, exhaust flags, damage values, enchants). This allows the network to natively detect spatial synergies—such as a zero-cost card sitting next to a high-damage card, or overlapping enchantments—before feeding the flattened spatial data into the fully connected `[512, 256]` policy layers.
 
 ### PPO Brain Hyperparameters
 *   **Unrestricted Model Loader:** The training script performs an exhaustive recursive search across all sub-directories (`checkpoints/`, `models/`, `hall_of_fame/`, etc.) and automatically resumes from the absolute newest `.zip` file based on disk timestamp.
 *   **Intelligent Stage Selection (Zip-Peeking):** Upon resuming, the orchestrator "peeks" inside the model zip to identify the current internal step count. It then automatically selects the correct Stage parameters (`n_steps`, `batch_size`) *before* initializing the brain, eliminating redundant stage hand-off transitions during reboots.
 *   **Rollout Buffer (Warmup Phase):** For the first 18,432 steps, the buffer uses `n_steps=1024` per node, resulting in a **3,072 step** update frequency to quickly establish early baselines.
 *   **Rollout Buffer (Main Phase):** Following the warmup, the main training stage uses `n_steps=3072` per node. With 3 training nodes, this results in exactly **9,216 steps** in the buffer before every neural weight update.
-*   **Batch Size:** 512.
-*   **Learning Rate:** Dynamically scaled per phase (`3e-4` in Phase 1, dropping to `5e-5` in Phase 4).
+*   **Batch Size:** Dynamically scaled stage-by-stage (`256` in Warmup, `512` in Main).
+*   **Learning Rate:** Dynamically scaled per phase (`1e-4` in Phase 1, dropping to `5e-5` in Phase 4).
 *   **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update. The "Hall of Fame" and "Ultimate Best" models are only overwritten during Mastery Exams if the agent breaks a historical high score.
 
 ### The Reward System (Master Class Telemetry)
@@ -112,9 +112,9 @@ The agent progresses through a dynamic curriculum (Phase 1 to Phase 4). Progress
 
 **Promotion Requirements:**
 To advance to the next phase, the agent must meet both a Mean Floor and Mean Reward target during its 10-episode exam. Targets are calibrated to match the bounty economy:
-*   **Phase 1 (Act 1 Mastery):** Requires **Mean Floor >= 16.0** AND **Mean Reward >= 100.0**. (Proves ability to reach the final Act 1 campfire while hunting Elites).
-*   **Phase 2 (Act 2 Mastery):** Requires **Mean Floor >= 33.0** AND **Mean Reward >= 250.0**. (Proves mastery of Act 2 scaling).
-*   **Phase 3 (Act 3 Mastery):** Requires **Mean Floor >= 50.0** AND **Mean Reward >= 450.0**. (Proves readiness for maximum difficulty).
+*   **Phase 1 (Act 1 Mastery):** Requires **Mean Floor >= 16.0** AND **Mean Reward >= 50.0**. (Proves ability to reach the final Act 1 campfire while hunting Elites).
+*   **Phase 2 (Act 2 Mastery):** Requires **Mean Floor >= 33.0** AND **Mean Reward >= 150.0**. (Proves mastery of Act 2 scaling).
+*   **Phase 3 (Act 3 Mastery):** Requires **Mean Floor >= 50.0** AND **Mean Reward >= 300.0**. (Proves readiness for maximum difficulty).
 *   **Phase 4 (Maximum Mastery):** The highest difficulty. The `ent_coef` is aggressively decayed, shifting the brain to pure deterministic exploitation.
 
 **Demotion (Step-Down Recovery):**
@@ -159,6 +159,20 @@ python train.py
 ### Monitoring Progress
 
 To monitor the agent's learning progress using TensorBoard:
+
+```bash
+tensorboard --logdir ./tensorboard
+```
+
+To run the custom log analysis script for a formatted progress report:
+```bash
+python analyze_logs.py
+```
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+s learning progress using TensorBoard:
 
 ```bash
 tensorboard --logdir ./tensorboard
