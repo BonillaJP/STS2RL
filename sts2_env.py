@@ -382,11 +382,9 @@ class SlayTheSpire2Env(gym.Env):
             for cell in cs.get("clickable_cells", []): mask[217 + (cell.get("y", 0) * 9) + cell.get("x", 0)] = True
             if cs.get("can_proceed"): mask[316] = True
         
-        current_hash = stable_hash(json.dumps(state, sort_keys=True))
-        if current_hash == self.last_state_hash:
-            for act_idx, count in self.state_action_counts.items():
-                if count >= 10:
-                    mask[act_idx] = False 
+        for act_idx, count in self.state_action_counts.items():
+            if count >= 10:
+                mask[act_idx] = False 
 
         if not mask.any():
             if screen in ["monster", "elite", "boss", "combat"]: mask[80] = True
@@ -609,12 +607,12 @@ class SlayTheSpire2Env(gym.Env):
         self._log_action(f"[Floor {floor} | {screen}] Attempting: {payload}", vision=vision_summary)
 
         if not self.action_masks()[action_idx]:
-            self._log_action(f"-> REJECTED: Action masked (Invalid).")
+            self._log_action(f"-> REJECTED: Action masked (Invalid). Penalty: -5.0")
             if self.total_episode_steps >= 1500: 
                 self.reboot_reason = "Timeout (Invalid Action Loop)"
                 self.needs_reboot = True
                 return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
-            self.stagnant_steps += 1; time.sleep(0.05); return self._flatten_state(self.current_state), -1.0, False, False, {"floor": self.previous_floor}
+            self.stagnant_steps += 1; time.sleep(0.05); return self._flatten_state(self.current_state), -5.0, False, False, {"floor": self.previous_floor}
         
         if payload.get("action") == "play_card":
             card_idx = payload.get("card_index")
@@ -644,12 +642,7 @@ class SlayTheSpire2Env(gym.Env):
                 self.reboot_reason = "API/State Invalid"
                 self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
-        new_hash = stable_hash(json.dumps(new_state, sort_keys=True))
-        if new_hash == self.last_state_hash:
-            self.state_action_counts[action_idx] = self.state_action_counts.get(action_idx, 0) + 1
-        else:
-            self.state_action_counts = {}
-            self.last_state_hash = new_hash
+        self.state_action_counts[action_idx] = self.state_action_counts.get(action_idx, 0) + 1
 
         if new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
             while new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
@@ -669,7 +662,9 @@ class SlayTheSpire2Env(gym.Env):
         if new_state.get("run", {}).get("is_victory", False): floor_now = 51
         player_now, reward, terminated = new_state.get("player", {}), 0.0, False
         p = self.training_phase
-        f_b, b_b, e_b, s_b = {1:(2.5,100.0,25.0,10.0), 2:(5.0,150.0,45.0,20.0), 3:(7.5,200.0,70.0,30.0)}.get(p, (10.0,300.0,100.0,50.0))
+        p = self.training_phase
+        f_b, b_b, e_b, s_b = 5.0, 100.0, 30.0, 15.0
+        hp_m = {1: 0.1, 2: 0.3, 3: 0.5}.get(p, 0.8)
         
         hp_before, hp_after = self.previous_hp, player_now.get("hp", 0)
         max_hp = max(player_now.get("max_hp", 1), 1)
@@ -720,8 +715,11 @@ class SlayTheSpire2Env(gym.Env):
                 player_now.get("block", 0) != self.last_prog_player_block or
                 player_now.get("energy", 0) != self.last_prog_energy)
         
-        if prog: self.stagnant_steps = 0
-        else: self.stagnant_steps += 1
+        if prog: 
+            self.stagnant_steps = 0
+            self.state_action_counts = {}
+        else: 
+            self.stagnant_steps += 1
         
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = new_screen, floor_now, curr_hp_sum, player_now.get("gold", 0)
         self.last_prog_player_block = player_now.get("block", 0)
@@ -734,10 +732,16 @@ class SlayTheSpire2Env(gym.Env):
         if new_screen == "game_over":
             reward -= 50.0
             terminated = True
+            self._log_action(f"-> FATAL: Game Over. Penalty: -50.0")
         elif floor_now == 51:
             terminated = True
         self.current_state = new_state
-        return obs, reward * (2.0 if floor_now >= 45 else 1.0), terminated, False, {"floor": floor_now}
+        
+        final_reward = reward * (2.0 if floor_now >= 45 else 1.0)
+        if not terminated and new_screen != "game_over":
+            self._log_action(f"-> ACCEPTED. Net Reward: {final_reward:+.2f}")
+            
+        return obs, final_reward, terminated, False, {"floor": floor_now}
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -747,6 +751,6 @@ class SlayTheSpire2Env(gym.Env):
         self.previous_floor, self.previous_hp = state.get("run", {}).get("floor", 0), state.get("player", {}).get("hp", 0)
         self.combat_step_count, self.total_episode_steps, self.stagnant_steps = 0, 0, 0
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = "none", -1, -1, -1
-        self.last_prog_energy, self.last_prog_player_block = -1, -1
+        self.last_prog_energy, self.last_prog_player_block, self.last_prog_deck_size = -1, -1, -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
         self.lowest_enemy_hp_seen = {}; return self._flatten_state(state), {}

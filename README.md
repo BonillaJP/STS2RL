@@ -3,6 +3,8 @@
 ## 📜 Statement of Intent & Disclaimer
 This project is developed strictly for **educational and research purposes**. It is an independent implementation designed to explore the application of specialized Reinforcement Learning (RL) in complex strategy games.
 
+⚠️ **WIP EXPERIMENTAL STATUS:** The neural architectures, reward systems, and environment mechanics within this repository are currently undergoing rapid, live experimentation. Code, parameters, and documentation are **not finalized** and will be updated frequently as the model's behavior is analyzed.
+
 **Primary Objectives:**
 *   **Specialized Logic:** While the base STS2MCP API allows for LLM-based interactions, LLMs often struggle with the intricate mathematical scaling of Slay the Spire 2. This project aims to build a dedicated, low-latency neural model capable of consistent, high-level tactical play.
 *   **Future Interoperability:** A long-term goal is to leverage the API's cooperative multiplayer capabilities to facilitate multi-agent synergy benchmarking and collaborative AI-human gameplay.
@@ -14,7 +16,7 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 
 *   **Synergy-CNN Vision:** The agent processes its hand using a 1D-Convolutional branch, allowing it to "scan" for card combos (e.g., Strength + Multi-hit) rather than just reading raw scalar numbers.
 *   **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's action masking, preventing invalid moves and desyncs.
-*   **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with robust selection detection. It natively prevents infinite toggle loops during multi-card selection events (e.g., "Choose 2 Cards") by utilizing aggressive string-casting for indices and expanded API flag detection.
+*   **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **Persistent Repetition Blocker**. Unlike standard blockers that reset on screen flickers, this registry tracks global action frequency and only resets when true mathematical progress (HP, Block, Energy, Floor, Gold, or Deck Size) is achieved. This physically prevents the agent from deadlocking in alternating multi-state loops (e.g., flickering between reward screens).
 *   **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs, infinite loops, or **API/State Invalid** errors. It automatically reboots the specific game node and triggers a **Neutral Abort (0.0 reward)** to protect the model's policy from superstitious learning without halting the entire training cluster.
 *   **Environment Stability:** Features module-level global constant management and robust dictionary-safe state parsing to ensure reliable distributed training across multiple nodes.
 *   **Closed-Loop Telemetry:** Implements a "verify-then-delete" log consolidation system. Upon reboot, the orchestrator automatically merges fragmented CSVs into master files, truncates "ghost steps" to match the brain checkpoint, and purges technical telemetry (TensorBoard/CSV) created after the checkpoint timestamp to ensure 100% data integrity.
@@ -90,22 +92,21 @@ A highly specialized, multi-layered reward system was designed to balance short-
 
 *   **Step Tax (`-0.01`):** A minimal flat penalty applied to every single action. This allows the agent to safely scale in long Ascension 8+ fights without mathematical bankruptcy.
 *   **Death Penalty (`-50.0`):** A massive flat penalty applied upon reaching the game over screen. Because normal play is now net-positive (`+2.0`), this penalty is sufficient to discourage suicide without causing Value Scale Divergence.
-*   **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps. **Note:** Progress is now tracked via changes in Floor, HP, Gold, **Block**, and **Energy**, ensuring defensive play is not erroneously punished.
+*   **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps. **Note:** Progress is now tracked via changes in Floor, HP, Gold, Block, Energy, and **Deck Size**, ensuring card removals and optimizations are recognized as progress.
     *   **15+ steps:** `-2.0` penalty per action.
     *   **30+ steps:** `-5.0` penalty per action.
     *   **50+ steps:** `-20.0` penalty per action.
+*   **Indecision Tax (Masked Actions):** To prevent the agent from "stalling" by spamming invalid inputs, every masked action attempt results in a sharp **`-5.0` penalty**. This forces the policy to quickly explore valid paths forward when stuck.
+*   **Reward Telemetry:** Every action reward is logged in real-time within the `node_trace_{port}.jsonl` files (e.g., `-> ACCEPTED. Net Reward: +2.49`). A **1GB Rotation Failsafe** ensures these logs never bloat system storage.
 *   **Dynamic Survival Instinct (Campfires):** To mirror human risk assessment, healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**:
     *   **Ratio > 90%:** Healing is penalized (**-0.5x**), Smithing is boosted (**1.5x**).
     *   **Ratio 80-90%:** Healing is neutral (**0.0x**), Smithing is encouraged (**1.2x**).
     *   **Ratio 50-80%:** Standard operation (**0.5x** Heal, **1.0x** Smith).
     *   **Ratio 30-50%:** Healing is prioritized (**1.5x**), Smithing is discouraged (**0.2x**).
     *   **Ratio < 30%:** Healing is vital (**4.0x**), Smithing is heavily penalized (**-2.0x**).
-*   **HP Delta (Combat):** Dynamic rewards (`+0.05` per enemy HP damage dealt) and a locked **0.5x** penalty multiplier for player HP lost in combat. This prevents "glass cannon" suicide runs.
-*   **The Phase Bounty Matrix:** Base point spikes awarded for crucial game milestones. Note that **Smithing** values below are base values modified by the Survival Instinct multiplier: 
-    *   *Phase 1:* Floor (+2.5), Boss (+100.0), Elite (+25.0), Smith (+10.0 Base)
-    *   *Phase 2:* Floor (+5.0), Boss (+150.0), Elite (+45.0), Smith (+20.0 Base)
-    *   *Phase 3:* Floor (+7.5), Boss (+200.0), Elite (+70.0), Smith (+30.0 Base)
-    *   *Phase 4:* Floor (+10.0), Boss (+300.0), Elite (+100.0), Smith (+50.0 Base)
+*   **HP Delta (Dynamic Strictness):** Dynamic rewards (`+0.05` per enemy HP damage dealt). To enforce "Tiered Strictness" across the curriculum, the penalty multiplier for Player HP lost scales aggressively per Phase: **Phase 1 (0.1x) -> Phase 2 (0.3x) -> Phase 3 (0.5x) -> Phase 4 (0.8x)**. This allows sloppy plays early on but demands perfection in late Ascensions.
+*   **The Universal Bounty Matrix:** To prevent exponential point inflation across phases, bounties are flattened into a universal constant. The difficulty scales entirely through the HP Delta penalty. Note that **Smithing** values below are base values modified by the Survival Instinct multiplier:
+    *   *Universal Bounties:* Floor (+5.0), Boss (+100.0), Elite (+30.0), Smith (+15.0 Base)
 
 **Design Rationale:**
 In early iterations, the agent suffered from "superstitious learning" (e.g., repeating useless actions) or simply surviving without getting stronger. Implementing a strict Step Tax forces the agent to act efficiently. Scaling up the Bounty Matrix in later phases forces the agent to actively hunt Elites and prioritize Campfire Smithing, which are mathematically necessary to survive high Ascensions.
@@ -118,10 +119,10 @@ The agent progresses through a dynamic curriculum (Phase 1 to Phase 4). Progress
 
 **Promotion Requirements:**
 To advance to the next phase, the agent must meet both a Mean Floor and Mean Reward target during its 10-episode exam. Targets are calibrated to match the bounty economy:
-*   **Phase 1 (Act 1 Mastery):** Requires **Mean Floor >= 16.0** AND **Mean Reward >= 50.0**. (Proves ability to reach the final Act 1 campfire while hunting Elites).
-*   **Phase 2 (Act 2 Mastery):** Requires **Mean Floor >= 33.0** AND **Mean Reward >= 150.0**. (Proves mastery of Act 2 scaling).
-*   **Phase 3 (Act 3 Mastery):** Requires **Mean Floor >= 50.0** AND **Mean Reward >= 300.0**. (Proves readiness for maximum difficulty).
-*   **Phase 4 (Maximum Mastery):** The highest difficulty. The `ent_coef` is aggressively decayed, shifting the brain to pure deterministic exploitation.
+*   **Phase 1 (Act 1 Mastery):** Focuses on **Ascension 0-1**. Proves ability to reach the final Act 1 campfire while handling **Swarming Elites** (+1 Elite per floor). Requires **Mean Floor >= 16.0** AND **Mean Reward >= 100.0**.
+*   **Phase 2 (Act 2 Mastery):** Focuses on **Ascension 2-3**. Agent must survive Act 2 scaling while managing **Reduced Healing** and **Poverty** (Reduced Gold). Requires **Mean Floor >= 33.0** AND **Mean Reward >= 300.0**.
+*   **Phase 3 (Act 3 Mastery):** Focuses on **Ascension 4-9**. Agent must optimize deck-thinning and defense to survive **deadlier attacks** and **tankier enemies**. Requires **Mean Floor >= 50.0** AND **Mean Reward >= 450.0**.
+*   **Phase 4 (Maximum Mastery):** Focuses on **Ascension 10 (Double Boss)**. The highest difficulty. The `ent_coef` is aggressively decayed, shifting the brain to pure deterministic exploitation.
 
 **Demotion (Step-Down Recovery):**
 If performance stalls in Phase 2+, the system implements a recovery step-down to repair foundational logic.
@@ -170,24 +171,14 @@ To monitor the agent's learning progress using TensorBoard:
 tensorboard --logdir ./tensorboard
 ```
 
-To run the custom log analysis script for a formatted progress report:
+### Technical Telemetry & Logs
+*   **Console Mirror (`logs/train_console.log`):** The training script automatically mirrors everything you see in your console to a persistent log file.
+    *   *Storage Failsafe:* This log features an automatic **50MB Rotation**. If the log exceeds 50MB, it is archived to a `.bak` file and a fresh log is started. It only ever keeps one backup (Max storage used: 100MB).
+*   **Formatted Reports:** To generate a formatted Master Telemetry Report (including neural health and confidence metrics):
 ```bash
 python analyze_logs.py
 ```
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-s learning progress using TensorBoard:
-
-```bash
-tensorboard --logdir ./tensorboard
-```
-
-To run the custom log analysis script for a formatted progress report:
-```bash
-python analyze_logs.py
-```
+*   **Node Traces (`logs/node_trace_{port}.jsonl`):** Detailed, high-speed logs showing every specific action attempt and the exact mathematical reward result (e.g., `-> ACCEPTED. Net Reward: +2.49`). Includes a **1GB Rotation Failsafe**.
 
 ## 📄 License
 

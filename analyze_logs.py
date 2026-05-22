@@ -71,9 +71,18 @@ def generate_report():
     if not df_prog.empty:
         latest = df_prog.iloc[-1]
         print(f"- SB3 Rollout: fps: {latest.get('time/fps', 0):.1f} | iterations: {latest.get('time/iterations', 0)} | elapsed: {latest.get('time/time_elapsed', 0)/60:.1f}m")
-        print(f"- Technical Health:")
-        print(f"  > Stability: entropy: {latest.get('train/entropy_loss', 0):.4f} | lr: {latest.get('train/learning_rate', 0):.2e} | loss: {latest.get('train/loss', 0):.4f}")
-        print(f"  > Policy/Value: kl: {latest.get('train/approx_kl', 0):.4f} | value_loss: {latest.get('train/value_loss', 0):.4f}")
+        print(f"- Technical Health & Confidence:")
+        entropy = latest.get('train/entropy_loss', 0)
+        kl = latest.get('train/approx_kl', 0)
+        v_loss = latest.get('train/value_loss', 0)
+        exp_var = latest.get('train/explained_variance', 0)
+        
+        # Simple heuristic for Policy Confidence
+        confidence = "HIGH (Exploiting)" if entropy > -0.5 else "LOW (Exploring)" if kl > 0.03 else "STABLE"
+        
+        print(f"  > Stability: entropy_loss: {entropy:.4f} | lr: {latest.get('train/learning_rate', 0):.2e} | loss: {latest.get('train/loss', 0):.4f}")
+        print(f"  > Policy/Value: approx_kl: {kl:.4f} | value_loss: {v_loss:.4f} | explained_variance: {exp_var:.4f}")
+        print(f"  > Confidence: {confidence}")
     else:
         print("- Technical Health: progress.csv is empty.")
 

@@ -18,6 +18,43 @@ from sb3_contrib.common.wrappers import ActionMasker
 from sb3_contrib.common.maskable.evaluation import evaluate_policy
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.logger import configure
+import sys
+
+# ==============================================================================
+# CONSOLE MIRROR LOGGER (Tee Utility)
+# ==============================================================================
+class TeeLogger:
+    def __init__(self, filename, mode="a", max_mb=50):
+        self.filename = filename
+        self.max_bytes = max_mb * 1024 * 1024
+        self.terminal = sys.stdout
+        self.log_file = open(filename, mode, encoding="utf-8")
+
+    def _rotate_if_needed(self):
+        if os.path.exists(self.filename) and os.path.getsize(self.filename) > self.max_bytes:
+            self.log_file.close()
+            bak_file = self.filename + ".bak"
+            if os.path.exists(bak_file):
+                try: os.remove(bak_file)
+                except: pass
+            try: os.rename(self.filename, bak_file)
+            except: pass
+            self.log_file = open(self.filename, "w", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self._rotate_if_needed()
+        self.log_file.write(message)
+        self.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
+
+class TeeErrorLogger(TeeLogger):
+    def __init__(self, filename, mode="a", max_mb=50):
+        super().__init__(filename, mode, max_mb)
+        self.terminal = sys.stderr
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, unwrap_vec_normalize
@@ -612,6 +649,16 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
 
 def main():
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
+    
+    # Initialize Console Mirror
+    console_log_path = os.path.join(LOG_DIR, "train_console.log")
+    sys.stdout = TeeLogger(console_log_path, mode="a")
+    sys.stderr = TeeErrorLogger(console_log_path, mode="a")
+    
+    print(f"\n{'='*50}")
+    print(f"--- NEW TRAINING SESSION STARTED: {datetime.datetime.now()} ---")
+    print(f"{'='*50}\n")
+    
     tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
     os.makedirs(tech_log_dir, exist_ok=True)
     new_logger = configure(tech_log_dir, ["stdout", "csv", "tensorboard"])
@@ -643,6 +690,7 @@ def main():
             
             if model is None: 
                 model = create_fresh_model(train_env, start_n_steps, start_batch_size, current_model_file)
+                model.set_logger(new_logger)
                 synchronize_logs(model.num_timesteps)
             
             if model.num_timesteps >= stage_end: 
