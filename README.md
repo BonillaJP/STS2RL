@@ -104,7 +104,7 @@ A highly specialized, multi-layered reward system was designed to balance short-
     *   **Ratio 50-80%:** Standard operation (**0.5x** Heal, **1.0x** Smith).
     *   **Ratio 30-50%:** Healing is prioritized (**1.5x**), Smithing is discouraged (**0.2x**).
     *   **Ratio < 30%:** Healing is vital (**4.0x**), Smithing is heavily penalized (**-2.0x**).
-*   **HP Delta (Dynamic Strictness):** Dynamic rewards (`+0.05` per enemy HP damage dealt). To enforce "Tiered Strictness" across the curriculum, the penalty multiplier for Player HP lost scales aggressively per Phase: **Phase 1 (0.1x) -> Phase 2 (0.3x) -> Phase 3 (0.5x) -> Phase 4 (0.8x)**. This allows sloppy plays early on but demands perfection in late Ascensions.
+*   **HP Delta (Dynamic Strictness):** Dynamic rewards (`+0.05` per enemy HP damage dealt). To enforce "Tiered Strictness" across the curriculum, the penalty multiplier for Player HP lost scales aggressively per Phase: **Phase 1 (0.1x), Phase 2 (0.15x), Phase 3 (0.2x), Phase 4 (0.4x), Phase 5 (0.6x), Phase 6 (0.8x)**. This explicitly allows sloppy plays in Phases 1-3, but demands absolute perfection in late Ascensions.
 *   **The Universal Bounty Matrix:** To prevent exponential point inflation across phases, bounties are flattened into a universal constant. The difficulty scales entirely through the HP Delta penalty. Note that **Smithing** values below are base values modified by the Survival Instinct multiplier:
     *   *Universal Bounties:* Floor (+5.0), Boss (+100.0), Elite (+30.0), Smith (+15.0 Base)
 
@@ -114,15 +114,18 @@ In early iterations, the agent suffered from "superstitious learning" (e.g., rep
 **Reward Experimentation!**
 The current numeric values are estimated based on the "Master Class" architecture and have proven sufficient for advanced progression. However, RL is highly sensitive to reward shaping. Experimentation is highly encouraged—alter these numbers in `sts2_env.py` to test new hypotheses, experiment with new topologies, or incentivize entirely different playstyles.
 
-### Phased Mastery Training
-The agent progresses through a dynamic curriculum (Phase 1 to Phase 4). Progression requires passing a "Mastery Exam" on the dedicated Evaluation Node.
+### Phased Mastery Training (6-Phase Curriculum)
+The agent progresses through a dynamic curriculum (Phase 1 to Phase 6). Progression requires passing a "Mastery Exam" on the dedicated Evaluation Node.
 
 **Promotion Requirements:**
-To advance to the next phase, the agent must meet both a Mean Floor and Mean Reward target during its 10-episode exam. Targets are calibrated to match the bounty economy:
-*   **Phase 1 (Act 1 Mastery):** Focuses on **Ascension 0-1**. Proves ability to reach the final Act 1 campfire while handling **Swarming Elites** (+1 Elite per floor). Requires **Mean Floor >= 16.0** AND **Mean Reward >= 100.0**.
-*   **Phase 2 (Act 2 Mastery):** Focuses on **Ascension 2-3**. Agent must survive Act 2 scaling while managing **Reduced Healing** and **Poverty** (Reduced Gold). Requires **Mean Floor >= 33.0** AND **Mean Reward >= 300.0**.
-*   **Phase 3 (Act 3 Mastery):** Focuses on **Ascension 4-9**. Agent must optimize deck-thinning and defense to survive **deadlier attacks** and **tankier enemies**. Requires **Mean Floor >= 50.0** AND **Mean Reward >= 450.0**.
-*   **Phase 4 (Maximum Mastery):** Focuses on **Ascension 10 (Double Boss)**. The highest difficulty. The `ent_coef` is aggressively decayed, shifting the brain to pure deterministic exploitation.
+To advance to the next phase, the agent must meet both a Mean Floor and Mean Reward target during its 10-episode exam.
+*   **Phase 1 (Act 1 - Floor 16):** Focuses on basic survival. **Sloppy play is allowed.** Requires Mean Floor >= 16.0 AND Mean Reward >= 100.0.
+*   **Phase 2 (Act 2 - Floor 33):** Focuses on Act 2 scaling. **Sloppy play is allowed.** Requires Mean Floor >= 33.0 AND Mean Reward >= 325.0.
+*   **Phase 3 (Act 3 - Floor 50):** Focuses on beating the base game. **Sloppy play is allowed.** Requires Mean Floor >= 50.0 AND Mean Reward >= 550.0.
+    *   **Phase 3 Graduation Backup:** Upon successfully beating Phase 3, the environment secures a permanent backup of the model in `models/phase_3_graduates/`. It rotates the top 5 highest-scoring graduates. This ensures the baseline "game-beating" model is preserved before it faces the extreme mathematical strictness of the Ascension phases.
+*   **Phase 4 (Ascension 1-4):** Focuses on early Ascension mechanics (e.g., deadlier enemies, less max HP). **Strict efficiency is demanded.** Requires Mean Floor >= 51.0 AND Mean Reward >= 500.0.
+*   **Phase 5 (Ascension 5-8):** Focuses on mid Ascension scaling (tougher enemies, less healing). **High optimization required.** Requires Mean Floor >= 51.0 AND Mean Reward >= 450.0.
+*   **Phase 6 (Ascension 9-10):** Focuses on late Ascension mastery (tougher bosses, Ascender's Bane curse). **Demands absolute perfection.** Requires Mean Floor >= 51.0 AND Mean Reward >= 400.0.
 
 **Demotion (Step-Down Recovery):**
 If performance stalls in Phase 2+, the system implements a recovery step-down to repair foundational logic.

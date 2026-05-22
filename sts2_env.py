@@ -664,7 +664,7 @@ class SlayTheSpire2Env(gym.Env):
         p = self.training_phase
         p = self.training_phase
         f_b, b_b, e_b, s_b = 5.0, 100.0, 30.0, 15.0
-        hp_m = {1: 0.1, 2: 0.3, 3: 0.5}.get(p, 0.8)
+        hp_m = {1: 0.1, 2: 0.15, 3: 0.2, 4: 0.4, 5: 0.6}.get(p, 0.8)
         
         hp_before, hp_after = self.previous_hp, player_now.get("hp", 0)
         max_hp = max(player_now.get("max_hp", 1), 1)

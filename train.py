@@ -403,9 +403,9 @@ class PhaseManagerCallback(BaseCallback):
         consistency = np.std(total_floors)
         
         # Mastery Thresholds
-        promo_reward_targets = {1: 50.0, 2: 150.0, 3: 300.0}
-        promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0}
-        exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51}
+        promo_reward_targets = {1: 100.0, 2: 325.0, 3: 550.0, 4: 500.0, 5: 450.0, 6: 400.0}
+        promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0, 4: 51.0, 5: 51.0, 6: 51.0}
+        exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51, 5: 51, 6: 51}
         
         target_win_floor = exam_win_floors.get(self.phase_idx, 51)
         wins = sum(1 for f in total_floors if f >= target_win_floor)
@@ -550,7 +550,38 @@ class PhaseManagerCallback(BaseCallback):
         r_target = promo_reward_targets.get(self.phase_idx, 999)
         f_target = promo_floor_targets.get(self.phase_idx, 999)
         
-        if mean_reward_final >= r_target and mean_floor >= f_target and self.phase_idx < 4:
+        if mean_reward_final >= r_target and mean_floor >= f_target and self.phase_idx < 6:
+            if self.phase_idx == 3:
+                grad_dir = os.path.join(MODEL_DIR, "phase_3_graduates")
+                os.makedirs(grad_dir, exist_ok=True)
+                grad_reg_file = os.path.join(grad_dir, "graduates.json")
+                graduates = []
+                if os.path.exists(grad_reg_file):
+                    try:
+                        with open(grad_reg_file, "r") as f: graduates = json.load(f)
+                    except: pass
+                
+                new_grad_id = f"grad_step_{current_step}"
+                graduates.append({"reward": float(mean_reward_final), "step": int(current_step), "id": new_grad_id, "date": str(datetime.datetime.now())})
+                graduates = sorted(graduates, key=lambda x: x["reward"], reverse=True)
+                
+                if len(graduates) > 5:
+                    to_delete = graduates[5:]
+                    graduates = graduates[:5]
+                    for entry in to_delete:
+                        old_id = entry["id"]
+                        for f in glob.glob(os.path.join(grad_dir, f"*{old_id}*")):
+                            try: os.remove(f)
+                            except: pass
+                
+                with open(grad_reg_file, "w") as f: json.dump(graduates, f, indent=4)
+                
+                if any(g["id"] == new_grad_id for g in graduates):
+                    self.model.save(os.path.join(grad_dir, f"{new_grad_id}.zip"))
+                    norm_env = unwrap_vec_normalize(self.training_env)
+                    if norm_env: norm_env.save(os.path.join(grad_dir, f"{new_grad_id}.pkl"))
+                    print(f"  [+] Phase 3 Graduation Backup Secured: {new_grad_id}")
+
             self.phase_idx += 1
             print(f"\n[PROMOTION] Mastery achieved! Advancing to Phase {self.phase_idx}!\n")
             print(f"  > Req: Reward {r_target:.1f}, Floor {f_target:.1f}")
