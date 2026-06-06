@@ -84,8 +84,8 @@ PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
         super().__init__(observation_space, features_dim=1152)
-        # 1D-CNN branch for hand synergy analysis
-        # Input shape: (batch, 30, 10) -> (batch, hand_features, hand_size)
+        
+        # Branch 1: 1D-CNN for hand synergy (Cost, Damage, Enchants)
         self.hand_cnn = nn.Sequential(
             nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -93,23 +93,33 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
             nn.ReLU(),
             nn.Flatten()
         )
+        
+        # Branch 2: 1D-CNN for relic synergies
         self.relic_cnn = nn.Sequential(
             nn.Conv1d(in_channels=5, out_channels=32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten()
         )
+        
+        # Branch 3: Metadata processor (Player HP, Gold, Floor)
         self.meta_processor = nn.Sequential(nn.Linear(1136, 512), nn.ReLU())
+        
+        # Branch 4: Final dense integration
         self.final_dense = nn.Sequential(nn.Linear(1280 + 640 + 512, 1152), nn.ReLU())
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
+        # State Vector Slicing
         meta_1 = observations[:, :320]
         hand_flat = observations[:, 320:620]
         meta_2 = observations[:, 620:770]
         relic_flat = observations[:, 770:870]
         meta_3 = observations[:, 870:]
+        
+        # Spatial Reshaping for CNNs
         metadata = th.cat([meta_1, meta_2, meta_3], dim=1)
         hand_spatial = hand_flat.view(-1, 10, 30).transpose(1, 2)
         relic_spatial = relic_flat.view(-1, 20, 5).transpose(1, 2)
+        
         return self.final_dense(th.cat([self.hand_cnn(hand_spatial), self.relic_cnn(relic_spatial), self.meta_processor(metadata)], dim=1))
 
 class GlobalPerformanceTracker:
@@ -166,7 +176,28 @@ def synchronize_logs(current_step, checkpoint_path=None):
         if purged_count > 0:
             print(f"  > sb3_tech: Purged {purged_count} future/ghost session files.")
 
-    log_files = {os.path.join(tech_log_dir, "progress.csv"): "timesteps", "exam_progression_log.csv": "step"}
+    session_dirs = sorted(glob.glob(os.path.join(tech_log_dir, "session_*")))
+    master_progress_path = os.path.join(tech_log_dir, "progress.csv")
+    
+    combined_progress = []
+    for s_dir in session_dirs:
+        prog_file = os.path.join(s_dir, "progress.csv")
+        if os.path.exists(prog_file) and os.path.getsize(prog_file) > 0:
+            try:
+                df = pd.read_csv(prog_file)
+                if not df.empty: combined_progress.append(df)
+            except: pass
+            
+    if combined_progress:
+        master_df = pd.concat(combined_progress, ignore_index=True)
+        # Drop duplicates based on the 'time/total_timesteps' column, keeping the last (most recent) entry
+        if 'time/total_timesteps' in master_df.columns:
+            master_df = master_df.drop_duplicates(subset=['time/total_timesteps'], keep='last')
+            master_df = master_df.sort_values(by=['time/total_timesteps'])
+        master_df.to_csv(master_progress_path, index=False)
+        print(f"  > sb3_tech: Merged {len(combined_progress)} session logs into master progress.csv.")
+
+    log_files = {master_progress_path: "time/total_timesteps", "exam_progression_log.csv": "step"}
     for path, step_col in log_files.items():
         if os.path.exists(path) and os.path.getsize(path) > 0:
             try:
@@ -324,28 +355,16 @@ class PhaseManagerCallback(BaseCallback):
                 }, f)
         except: pass
 
-    def _on_training_start(self): 
-        self._apply_phase()
-        self._on_step()
-
     def _apply_phase(self):
-        self.training_env.env_method("set_training_phase", self.phase_idx)
-        self.save_state()
-        # Dynamic Entropy: Base decay + "Shock" boost if failing
-        base_entropy = max(0.01, 0.05 * (0.7 ** (self.phase_idx - 1)))
-        self.model.ent_coef = min(0.05, base_entropy + (self.consecutive_failures * 0.01))
-        lr = 1e-4 if self.phase_idx < 3 else 5e-5
-        for p in self.model.policy.optimizer.param_groups: p['lr'] = lr
-
-    def _on_step(self) -> bool:
-        current_step = self.model.num_timesteps
-        self.training_env.env_method("set_global_step", current_step)
-        return True
-
-    def _on_rollout_start(self) -> None:
-        current_step = self.model.num_timesteps
-        if current_step >= self.last_eval_step + self.eval_freq_global:
-            self._run_exam()
+        """Updates the environments and model for the current phase."""
+        for env in self.training_env.envs:
+            env.unwrapped.set_training_phase(self.phase_idx)
+        for env in self.eval_env.envs:
+            env.unwrapped.set_training_phase(self.phase_idx)
+        
+        lr = {1: 1e-4, 2: 1e-4, 3: 1e-4, 4: 5e-5, 5: 5e-5}.get(self.phase_idx, 5e-5)
+        self.model.learning_rate = lr
+        print(f"[CURRICULUM] Transitioning to Phase {self.phase_idx}. New LR: {lr}")
 
     def _run_exam(self):
         current_step = self.model.num_timesteps
@@ -402,7 +421,6 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Mastery Thresholds
         promo_reward_targets = {1: 100.0, 2: 325.0, 3: 550.0, 4: 500.0, 5: 450.0, 6: 400.0}
         promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0, 4: 51.0, 5: 51.0, 6: 51.0}
         exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51, 5: 51, 6: 51}
@@ -451,7 +469,7 @@ class PhaseManagerCallback(BaseCallback):
                 "consistency_stddev": float(consistency),
                 "success_rate": f"{wins}/{self.n_eval_episodes}"
             }, bio_f, indent=4)
-        
+
         prog_log_path = os.path.join(LOG_DIR, "exam_progression_log.csv")
         prog_data = {
             "step": [current_step],
@@ -466,14 +484,14 @@ class PhaseManagerCallback(BaseCallback):
             df_new.to_csv(prog_log_path, index=False)
         else:
             df_new.to_csv(prog_log_path, mode='a', header=False, index=False)
-        
+
         top_log_path = os.path.join(TOP_MODELS_DIR, "top_models_log.json")
         top_entries = []
         if os.path.exists(top_log_path):
             try:
                 with open(top_log_path, "r") as f: top_entries = json.load(f)
             except: pass
-        
+
         top_entries.append({
             "mean_reward": float(mean_reward_final),
             "mean_floor": float(mean_floor),
@@ -484,19 +502,19 @@ class PhaseManagerCallback(BaseCallback):
             "id": f"step_{current_step}_phase_{self.phase_idx}"
         })
         top_entries = sorted(top_entries, key=lambda x: x["mean_reward"], reverse=True)[:3]
-        
+
         with open(top_log_path, "w") as f: json.dump(top_entries, f, indent=4)
-        
+
         for rank, entry in enumerate(top_entries, 1):
             if entry["id"] == f"step_{current_step}_phase_{self.phase_idx}":
                 rank_model_path = os.path.join(TOP_MODELS_DIR, f"model_rank_{rank}_step_{current_step}_phase_{self.phase_idx}.zip")
                 rank_vec_path = rank_model_path.replace(".zip", ".pkl")
                 rank_report_path = os.path.join(TOP_MODELS_DIR, f"report_rank_{rank}_step_{current_step}_phase_{self.phase_idx}.txt")
-                
+
                 self.model.save(rank_model_path)
                 norm_env = unwrap_vec_normalize(self.training_env)
                 if norm_env: norm_env.save(rank_vec_path)
-                
+
                 with open(rank_report_path, "w") as f:
                     f.write(f"{'='*40}\n")
                     f.write(f"TOP MODEL RANK #{rank} - VERIFIED EXAM\n")
@@ -511,7 +529,7 @@ class PhaseManagerCallback(BaseCallback):
                     for i, (r, f_val) in enumerate(zip(total_rewards, total_floors)):
                         f.write(f"Run {i+1}: Floor {f_val} | Reward {r:.1f}\n")
                     f.write(f"{'='*40}\n")
-                
+
                 for f in glob.glob(os.path.join(TOP_MODELS_DIR, f"*_rank_{rank}_*")):
                     if entry["id"] not in f:
                         try: os.remove(f)
@@ -520,88 +538,47 @@ class PhaseManagerCallback(BaseCallback):
         if mean_reward_final > self.best_mean_reward:
             self.best_mean_reward = mean_reward_final
             self.consecutive_regressions = 0
-            best_model_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_model_Phase_{self.phase_idx}.zip")
-            best_vec_path = best_model_path.replace(".zip", ".pkl")
-            
-            self.model.save(best_model_path)
-            norm_env = unwrap_vec_normalize(self.training_env)
-            if norm_env: norm_env.save(best_vec_path)
-            
-            best_stats_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_stats_Phase_{self.phase_idx}.txt")
-            with open(best_stats_path, "w") as f:
-                f.write(f"{'='*40}\n")
-                f.write(f"CHAMPION MODEL - PHASE {self.phase_idx}\n")
-                f.write(f"{'='*40}\n")
-                f.write(f"Total Training Steps: {current_step}\n")
-                f.write(f"Total Exam Runs: {self.n_calls}\n\n")
-                f.write(f"--- FLOOR METRICS (10-Game Exam) ---\n")
-                f.write(f"Mean Floor Reached: {mean_floor:.1f}\n")
-                f.write(f"Best Floor Reached: {best_floor}\n")
-                f.write(f"Worst Floor Reached: {worst_floor}\n\n")
-                f.write(f"--- REWARD METRICS (10-Game Exam) ---\n")
-                f.write(f"Mean Score: {mean_reward_final:.2f}\n")
-                f.write(f"Highest Score: {np.max(total_rewards):.2f}\n")
-                f.write(f"Lowest Score: {np.min(total_rewards):.2f}\n")
-                f.write(f"{'='*40}\n")
-            print(f"  [+] New Personal Best for Phase {self.phase_idx}!")
-        else:
-            self.consecutive_regressions += 1
-
-        r_target = promo_reward_targets.get(self.phase_idx, 999)
-        f_target = promo_floor_targets.get(self.phase_idx, 999)
-        
-        if mean_reward_final >= r_target and mean_floor >= f_target and self.phase_idx < 6:
-            if self.phase_idx == 3:
-                grad_dir = os.path.join(MODEL_DIR, "phase_3_graduates")
-                os.makedirs(grad_dir, exist_ok=True)
-                grad_reg_file = os.path.join(grad_dir, "graduates.json")
-                graduates = []
-                if os.path.exists(grad_reg_file):
-                    try:
-                        with open(grad_reg_file, "r") as f: graduates = json.load(f)
-                    except: pass
-                
-                new_grad_id = f"grad_step_{current_step}"
-                graduates.append({"reward": float(mean_reward_final), "step": int(current_step), "id": new_grad_id, "date": str(datetime.datetime.now())})
-                graduates = sorted(graduates, key=lambda x: x["reward"], reverse=True)
-                
-                if len(graduates) > 5:
-                    to_delete = graduates[5:]
-                    graduates = graduates[:5]
-                    for entry in to_delete:
-                        old_id = entry["id"]
-                        for f in glob.glob(os.path.join(grad_dir, f"*{old_id}*")):
-                            try: os.remove(f)
-                            except: pass
-                
-                with open(grad_reg_file, "w") as f: json.dump(graduates, f, indent=4)
-                
-                if any(g["id"] == new_grad_id for g in graduates):
-                    self.model.save(os.path.join(grad_dir, f"{new_grad_id}.zip"))
-                    norm_env = unwrap_vec_normalize(self.training_env)
-                    if norm_env: norm_env.save(os.path.join(grad_dir, f"{new_grad_id}.pkl"))
-                    print(f"  [+] Phase 3 Graduation Backup Secured: {new_grad_id}")
-
-            self.phase_idx += 1
-            print(f"\n[PROMOTION] Mastery achieved! Advancing to Phase {self.phase_idx}!\n")
-            print(f"  > Req: Reward {r_target:.1f}, Floor {f_target:.1f}")
-            print(f"  > Got: Reward {mean_reward_final:.1f}, Floor {mean_floor:.1f}")
             self.consecutive_failures = 0
-            self._apply_phase()
+            
+            ultimate_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_phase_{self.phase_idx}.zip")
+            ultimate_vec = ultimate_path.replace(".zip", ".pkl")
+            ultimate_report = ultimate_path.replace(".zip", "_stats.txt")
+            
+            self.model.save(ultimate_path)
+            norm_env = unwrap_vec_normalize(self.training_env)
+            if norm_env: norm_env.save(ultimate_vec)
+            shutil.copy(latest_stats_path, ultimate_report)
+            print(f"[PROMOTION] All-Time Best for Phase {self.phase_idx} updated!")
+        
+        # Phase Advancement Logic
+        if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= promo_floor_targets.get(self.phase_idx, 99):
+            if self.phase_idx < 6:
+                print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
+                self.phase_idx += 1
+                self.best_mean_reward = -1000.0
+                self.consecutive_regressions = 0
+                self.consecutive_failures = 0
+                self._apply_phase()
+            else:
+                print(f"\n[MAXED] Training complete. Phase 6 Mastery Achieved.")
         else:
-            if self.phase_idx > 1:
-                if wins == 0: self.consecutive_failures += 1
-                else: self.consecutive_failures = 0
-
-                if self.consecutive_failures >= 3:
+            if wins == 0:
+                self.consecutive_failures += 1
+                print(f"[REGRESSION] No games hit doorstep. Strike {self.consecutive_failures}/3.")
+                if self.consecutive_failures >= 3 and self.phase_idx > 1:
+                    print(f"[DEMOTION] Policy collapse detected. Stepping down to Phase {self.phase_idx-1}...")
                     self.phase_idx -= 1
-                    print(f"\n[DEMOTION] Performance Stall Detected. Stepping down to Phase {self.phase_idx}...")
                     self.consecutive_failures = 0
                     self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 5.0 
                     self._apply_phase()
         
         self.save_state()
         print(f"{'='*60}\n")
+
+    def _on_step(self) -> bool:
+        if self.model.num_timesteps >= self.last_eval_step + self.eval_freq_global:
+            self._run_exam()
+        return True
 
 def get_newest_model_and_vec():
     all_zips = []
@@ -660,7 +637,7 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
 def make_env(port, is_eval=False):
     def _init():
         node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
-        base_path = f"C:\\Program Files (x86)\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
+        base_path = f"D:\\Games\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
         data_dir = f"Node{node_id}_Data"
         base_env = SlayTheSpire2Env(port=port, game_path=base_path, user_data_dir=data_dir, force_fresh=False, is_eval=is_eval)
         env = ActionMasker(base_env, lambda e: e.action_masks())
@@ -681,12 +658,10 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
 def main():
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
     
-    # Global Log Nuke (STS2 engine logs)
     appdata = os.getenv('APPDATA')
     if appdata:
         game_logs_path = os.path.join(appdata, "SlayTheSpire2", "logs")
         if os.path.exists(game_logs_path):
-            print(f"[SYSTEM] Nuking engine logs: {game_logs_path}")
             for f in glob.glob(os.path.join(game_logs_path, "*")):
                 try: 
                     if os.path.isfile(f): os.remove(f)
@@ -702,8 +677,9 @@ def main():
     print(f"{'='*50}\n")
     
     tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
-    os.makedirs(tech_log_dir, exist_ok=True)
-    new_logger = configure(tech_log_dir, ["stdout", "csv", "tensorboard"])
+    session_log_dir = os.path.join(tech_log_dir, f"session_{SESSION_ID}")
+    os.makedirs(session_log_dir, exist_ok=True)
+    new_logger = configure(session_log_dir, ["stdout", "csv", "tensorboard"])
     current_model_file, latest_vec_path = get_newest_model_and_vec()
     train_env = setup_vec_env(ports=TRAIN_PORTS, vec_path=latest_vec_path, is_eval=False)
     eval_env = setup_vec_env(ports=[EVAL_PORT], vec_path=latest_vec_path, is_eval=True)

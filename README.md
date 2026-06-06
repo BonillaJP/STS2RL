@@ -48,16 +48,29 @@ Because Steam normally restricts running multiple instances of a game, the follo
 
 1.  **Clone the Game:** Copy the base `Slay the Spire 2` Steam installation directory to create separate game folders for each node.
 2.  **Bypass Steam Lock:** Inside each cloned folder, create a text file named `steam_appid.txt` and paste the Slay the Spire 2 Steam App ID inside it. This allows the clones to run independently.
-3.  **Differentiate Processes:** To allow the Python orchestrator to kill and restart specific frozen nodes independently, rename the game executable and its associated data file in each folder (e.g., rename `SlayTheSpire2.exe` and `SlayTheSpire2.pck` to `Node 1.exe` and `Node 1.pck`, `Node 2.exe`, etc.).
-4.  **Configure the API Mod:** Install the STS2MCP mod into each folder. Open the mod's `.conf` file in each respective folder and assign their unique ports.
+3.  **Differentiate Processes:** To allow the Python orchestrator to kill and restart specific frozen nodes independently, rename the game executable and its associated data file in each folder (e.g., rename `Node 1.exe` and `Node 1.pck`, `Node 2.exe`, etc.). Rename the folders as well (e.g., `STS2_Node_1`, `STS2_Node_2`, etc.).
+4.  **Configure Paths:** Update the hardcoded `base_path` variables in `sts2_env.py` and `train.py` to match the exact directory where your game nodes are located.
+5.  **Configure the API Mod:** Install the STS2MCP mod into each folder. Open the mod's `.conf` file in each respective folder and assign their unique ports.
+
+### 🛡️ Automated Profile Isolation (API Stability)
+To avoid the "Corrupt Save File" API startup error and ensure state integrity during parallel rollouts, the environment **automatically enforces** a unique profile mapping for each node. Slay the Spire 2 supports exactly 3 profiles:
+*   **Node 1 (Port 15526):** Automatically switches to **Profile 1**.
+*   **Node 2 (Port 15527):** Automatically switches to **Profile 2**.
+*   **Node 3 (Port 15528):** Automatically switches to **Profile 3**.
+*   **Node 4 (Evaluation - Port 15529):** Defaults to **Profile 1**.
+
+This automated enforcement prevents the game engine from attempting to write/load from the same save metadata simultaneously, which is the primary cause of the "Neutral Abort" engine bug during high-speed cluster reboots. The orchestrator detects the current profile at the main menu and programmatically switches it if a mismatch is found.
 
 ### 🚨 CRITICAL CAUTION: Storage Bloat Bug (Godot Engine Logs)
 Slay the Spire 2 is powered by the Godot engine, which generates detailed debug logs in the system's `AppData` directory (`%APPDATA%\SlayTheSpire2\logs\`). Under normal conditions, log utilization is remarkably low—typically remaining below a few megabytes or a gigabyte at most throughout extensive training flights.
 
 ⚠️ **KNOWN ENGINE BUG LOOP:** A massive storage consumption spike can happen if the evaluation or training nodes encounter a deterministic preloading/rendering exception. Specifically, when the model triggers the `PunchOff` event (most commonly observed on **Floor 14**), a native C# NullReferenceException inside the game's asynchronous animation thread causes an infinite error dump. Because this failure loops endlessly on every single frame tick (`_Process`), the log file can rapidly balloon by tens of gigabytes within minutes.
 
-**Current Mitigation Strategy:**
-We do not currently have an automated software-level patch or command-line override configuration capable of breaking this internal engine loop. If you observe astronomical storage consumption or notice that your hard drive is losing space rapidly during exams, **you must manually delete the log files** from your system log directory. While the `_vacuum_disk` routine inside `sts2_env.py` performs aggressive disk cleanup during full system reboots, it is unable to release the file lock while an active rendering loop is running.
+**Automated Mitigation Strategy:**
+The environment now includes a multi-layered **Self-Healing** system to handle this automatically:
+1.  **Fast Timeout:** API timeouts are set to **5.0s**. If a node freezes, it is detected and rebooted within seconds.
+2.  **Real-Time Size Monitor:** The environment checks the size of `godot.log` every 25 actions. If it exceeds **200 MB**, an immediate "Storage Bloat Failsafe" reboot is triggered.
+3.  **Aggressive Vacuuming:** Upon reboot, the system force-kills the game node and purges `godot.log` if it is over the 200 MB safety threshold. **Note:** All game nodes must be terminated to release the shared file lock on `godot.log` for successful deletion. Reclaiming disk space is only guaranteed after the orchestrator successfully terminates the frozen process.
 
 ## ⚙️ Technical Deep Dive
 
@@ -90,6 +103,12 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 * **Batch Size:** Dynamically scaled stage-by-stage (`256` in Warmup, `512` in Main).
 * **Learning Rate:** Dynamically scaled per phase (`1e-4` in Phase 1, dropping to `5e-5` in Phase 4).
 * **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update. The "Hall of Fame" and "Ultimate Best" models are only overwritten during Mastery Exams if the agent breaks a historical high score.
+
+### 📊 Persistent Data & Session Logging
+To guarantee 100% data integrity across cluster reboots, the project implements a **Fragment-and-Merge** logging architecture:
+*   **Session Isolation:** Every time `train.py` starts, it creates a unique session folder (`logs/sb3_tech/session_{ID}/`). All SB3 metrics and TensorBoard events are isolated here to prevent overwriting historical data.
+*   **Automatic Consolidation:** Upon startup, the orchestrator scans all session folders and automatically merges fragmented `progress.csv` files into a single master log.
+*   **Ghost Step Truncation:** During synchronization, the system identifies and purges "ghost steps"—data recorded after the last brain checkpoint—to ensure your telemetry exactly matches your model's neural state.
 
 ### The Reward System (Master Class Telemetry)
 A highly specialized, multi-layered reward system was designed to balance short-term survival with long-term scaling:
@@ -151,7 +170,7 @@ Before running this project, ensure the following are installed:
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/BonillaJP/STS2RL.git](https://github.com/BonillaJP/STS2RL.git)
+    git clone https://github.com/BonillaJP/STS2RL.git
     cd STS2RL
     ```
 
@@ -168,3 +187,4 @@ Initialize the training environment and connect to the local game nodes by runni
 
 ```bash
 python train.py
+```
