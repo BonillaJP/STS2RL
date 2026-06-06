@@ -575,9 +575,11 @@ class PhaseManagerCallback(BaseCallback):
         self.save_state()
         print(f"{'='*60}\n")
 
-    def _on_step(self) -> bool:
+    def _on_rollout_start(self) -> None:
         if self.model.num_timesteps >= self.last_eval_step + self.eval_freq_global:
             self._run_exam()
+
+    def _on_step(self) -> bool:
         return True
 
 def get_newest_model_and_vec():
