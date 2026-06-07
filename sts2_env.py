@@ -230,10 +230,6 @@ class SlayTheSpire2Env(gym.Env):
         state = self.current_state
         mask = np.zeros(len(FLAT_ACTIONS), dtype=bool)
         if not state: return mask
-        
-        # Action Cooldowns
-        for act_idx, cooldown in self.action_cooldowns.items():
-            if cooldown > 0: mask[act_idx] = False
 
         raw_screen = state.get("state_type", "unknown")
         player = state.get("player", {})
@@ -387,7 +383,18 @@ class SlayTheSpire2Env(gym.Env):
 
         if not mask.any() or getattr(self, 'state_rejection_count', 0) >= 20:
             if screen in ["monster", "elite", "boss", "combat"]: mask[80] = True
+            elif screen == "map":
+                map_data = state.get("map", {})
+                next_nodes = map_data.get("next_options", [])
+                selectable_nodes = [o.get("index") for o in next_nodes if o.get("is_selectable", True)]
+                if selectable_nodes: mask[155 + selectable_nodes[0]] = True
+                else: mask[123] = True
             else: mask[123] = True
+            
+        # Action Cooldowns (Enforced last to prevent overwriting)
+        for act_idx, cooldown in self.action_cooldowns.items():
+            if cooldown > 0: mask[act_idx] = False
+            
         return mask
 
     def _post(self, payload):
@@ -589,7 +596,7 @@ class SlayTheSpire2Env(gym.Env):
         battle = self.current_state.get("battle", {})
         enemies_data = battle.get("enemies", [])
         
-        # Priority Classification (Fixes exhaust deadlocks)
+        # Priority Classification
         if "hand_select" in self.current_state: screen = "hand_select"
         elif any(k in self.current_state for k in OVERLAY_KEYS): screen = "card_select_overlay"
         elif enemies_data or battle.get("is_play_phase"): screen = "combat"
@@ -634,6 +641,14 @@ class SlayTheSpire2Env(gym.Env):
         valid = self._post(payload)
         time.sleep(0.01) # 10ms Stability Throttle
         new_state = self._raw_state()
+        
+        # Dynamic Screen Transition Polling (Optimized for Fast Mode)
+        if payload.get("action") in ["choose_map_node", "proceed"]:
+            old_screen = self.current_state.get("state_type")
+            for _ in range(40): # Max 2.0 seconds
+                if not new_state or new_state.get("state_type") != old_screen: break
+                time.sleep(0.05); new_state = self._raw_state()
+
         if not valid or not new_state:
             time.sleep(0.05); new_state = self._raw_state()
             if not new_state:
@@ -641,6 +656,8 @@ class SlayTheSpire2Env(gym.Env):
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
         if payload.get("action") in ["play_card", "use_potion"]: self.action_cooldowns[action_idx] = 5
+        elif payload.get("action") in ["choose_map_node", "proceed"]: self.action_cooldowns[action_idx] = 30
+        elif payload.get("action") in ["claim_reward", "select_card_reward"]: self.action_cooldowns[action_idx] = 10
         self.state_action_counts[action_idx] = self.state_action_counts.get(action_idx, 0) + 1
         if payload.get("action") == "select_card": self.internal_selection_history.append(payload.get("index"))
         elif payload.get("action") in ["confirm_selection", "proceed", "cancel_selection"]: self.internal_selection_history = []
@@ -667,12 +684,6 @@ class SlayTheSpire2Env(gym.Env):
 
         if payload.get("action") == "end_turn":
             self.combat_turn_count += 1
-            for _ in range(100):
-                time.sleep(0.1); temp = self._raw_state()
-                if not temp: continue
-                if temp.get("battle", {}).get("is_play_phase") or temp.get("state_type") != "monster":
-                    new_state = temp; break
-            else: new_state = self._raw_state()
         if new_screen in ["monster", "elite", "boss"] and self.last_prog_screen not in ["monster", "elite", "boss"]: self.combat_turn_count = 0
 
         b_breakdown["tax"] -= 0.01 

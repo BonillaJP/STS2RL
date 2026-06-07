@@ -18,7 +18,9 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 * **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's logic. The environment performs a **Fresh API Fetch** at the start of every Step cycle and utilizes a high-performance cache for masking, preventing desyncs without sacrificing training throughput (FPS).
 * **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **One-Way Gate** selection system.
     * **Zero-Reboot Grade Stability:**
-    * **Smart Progress Tracking:** The environment implements a multi-dimensional stagnation tracker. Counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 40-step reboot failsafe only triggers for true engine freezes, fulfilling the mandate to minimize technical interruptions.
+        * **Fast Mode Dynamic Polling:** Replaces hardcoded thread sleeps with a high-speed polling loop. During screen transitions (e.g., Map or Proceed), the environment polls the game state every 50ms, instantly resuming training the absolute millisecond the transition finishes. This safely prevents action spam while maintaining maximum SPS in Fast Mode.
+        * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards or using potions) to prevent the agent from spamming actions faster than the engine can process them.
+        * **Smart Progress Tracking:** The environment implements a multi-dimensional stagnation tracker. Counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 40-step reboot failsafe only triggers for true engine freezes, fulfilling the mandate to minimize technical interruptions.
     * **Absolute path-based Force-Kill:** The reboot logic now performs an exhaustive path-based cleanup of the node's specific folder before relaunching. This physically prevents the spawning of duplicate game instances and ensures file locks on `godot.log` are released.
     * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, physically forcing the agent to resolve choices before fighting to prevent deadlocks.
     * **Safe Throttle:** Implements a global **10ms input delay** (0.01s) to provide a safety buffer for the Godot engine's C# animation handlers, physically preventing "UI Stacking" and frozen buttons.
@@ -80,7 +82,7 @@ The environment now includes a multi-layered **Self-Healing** system to handle t
 4.  **Absolute Mask Hardening:** To prevent technical deadlocks, the environment employs a **Finality-First** masking architecture. 
     *   **Deterministic Map Navigation:** The `proceed` button is strictly disabled if Map Nodes are available, forcing a destination choice.
     *   **Repetition Finality:** The 10-click repetition blocker is the **final step** in the masking process, ensuring it can never be overridden by safety fallbacks.
-5.  **Global Stagnation Shield:** To prevent technical deadlocks and minimize cluster-wide reboots, the environment employs a **Surgical Recovery** system. If an agent fails to produce physical progress after **20 rejected attempts** or **40 stagnant steps**, the environment programmatically executes a "Smart Kick"—identifying and forcing a legally valid move (e.g., picking a map node or proceeding). This breaks the loop and resets the stagnation timers before the 100-step cluster nuke can trigger.
+5. **Global Stagnation Shield:** To prevent technical deadlocks and minimize cluster-wide reboots, the environment employs a **Surgical Recovery** system. If an agent fails to produce physical progress after **20 rejected attempts** or **40 stagnant steps**, the environment programmatically executes an intelligent "Smart Kick". For example, if stuck on the map screen, it intelligently identifies and selects an available map node rather than defaulting to an invalid 'proceed' action. This safely breaks the loop and resets the stagnation timers before the 40-step technical reboot failsafe can trigger.
 
 ## ⚙️ Technical Deep Dive
 
@@ -191,3 +193,19 @@ Initialize the training environment and connect to the local game nodes by runni
 ```bash
 python train.py
 ```
+
+## 📊 Telemetry & Debugging
+
+The project includes built-in diagnostic tools to monitor cluster health, timings, and training progression in real-time.
+
+1.  **Log Analysis (`analyze_logs.py`)**
+    Provides a comprehensive overview of the training telemetry, including early learning deltas, SB3 rollout metrics (FPS, explained variance, entropy loss), and storage telemetry.
+    ```bash
+    python analyze_logs.py
+    ```
+
+2.  **Cluster Diagnostic Dashboard (`debug_cluster.py`)**
+    Monitors live node timings, action rejections, and auto-kicks to ensure the environment is correctly handling Fast Mode animations without deadlocking. It outputs the true average cycle time (seconds/step) for each active node.
+    ```bash
+    python debug_cluster.py
+    ```
