@@ -18,15 +18,20 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 * **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's logic. The environment performs a **Fresh API Fetch** at the start of every Step cycle and utilizes a high-performance cache for masking, preventing desyncs without sacrificing training throughput (FPS).
 * **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **One-Way Gate** selection system.
     * **Zero-Reboot Grade Stability:**
-        * **Patient API Fetching:** Implements a robust state retriever that performs 10 micro-retries (10ms intervals) before declaring an API failure. This allows the Godot engine to finish room transitions and loading spikes without triggering technical reboots.
-        * **Lightning Reboot Sequence:** Replaces hardcoded 30s warmup delays with a high-speed Port Polling loop. The orchestrator checks the game's API port every 1s, resuming training the absolute millisecond the game becomes alive.
-        * **Deterministic Loop Protection:** Differentiates between **Hard Progress** (changes in Floor, HP, Gold, or Deck Size) and **Screen Progress**. Action-use counters (the 10-use limit) are strictly preserved across screen transitions and only reset when Hard Progress is detected, physically preventing infinite menu loops.
+        * **Patient API Fetching (Level 1):** Implements a robust state retriever that performs **20 micro-retries** (10ms intervals) before declaring an API failure. This allows the Godot engine up to **10 seconds** to finish room transitions and loading spikes without triggering technical reboots.
+        * **60s Startup Safety (Level 2):** The orchestrator provides a generous **60-second window** for the game to reach the Main Menu during reboots, physically preventing the "Murder Loop" where the script kills the game while it is still booting.
+        * **Ghost Save Recovery (Level 3):** Automatically detects and clears cached "Continue" states by toggling profiles (e.g., 1 -> 2 -> 1) upon reboot. This forces the Godot engine to refresh its metadata and realize the run is gone.
+        * **Lightning Reboot Sequence:** Replaces hardcoded warmup delays with a high-speed Port Polling loop. The orchestrator checks the game's API port every 1s, resuming training the absolute millisecond the game becomes alive.
+        * **Surgical Reboot Protocol:** For standard failures (deadlocks or API stutters), the system identifies and kills **ONLY the specific frozen node**. All other nodes continue training uninterrupted.
+        * **Full Cluster Purge:** Triggered ONLY if `godot.log` exceeds 1GB. The system force-kills ALL nodes simultaneously to release file locks and autonomously deletes the bloated log.
+        * **Void Reward System:** To maintain training integrity, any run interrupted by a technical reboot (Deadlock, Bloat, or Engine Bug) is automatically **Voided**. The environment returns a **0.0 reward** (Neutral Abort), ensuring that technical failures do not influence the neural policy.
+        * **Deterministic Loop Protection:** Differentiates between **Hard Progress** (changes in Floor, HP, Gold, or Deck Size) and **Screen Progress**. Action-use counters are strictly preserved across screen transitions and only reset when Hard Progress is detected, preventing infinite menu loops.
         * **Fast Mode Dynamic Polling:** Replaces hardcoded thread sleeps with a high-speed polling loop. During screen transitions, the environment polls the game state every 50ms, instantly resuming training the absolute millisecond the transition finishes.
-        * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards or using potions) to prevent the agent from spamming actions faster than the engine can process them.
-        * **Smart Progress Tracking:** The environment implements a multi-dimensional stagnation tracker. Counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 100-step reboot failsafe only triggers for true engine freezes.
-    * **Absolute path-based Force-Kill:** The reboot logic now performs an exhaustive path-based cleanup of the node's specific folder before relaunching. This physically prevents the spawning of duplicate game instances and ensures file locks on `godot.log` are released.
-    * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, physically forcing the agent to resolve choices before fighting to prevent deadlocks.
-    * **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers.
+        * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards) to prevent the agent from spamming actions faster than the engine can process them.
+        * **Smart Progress Tracking:** Stagnation counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 100-step reboot failsafe only triggers for true engine freezes.
+    * **Absolute path-based Force-Kill:** The reboot logic performs an exhaustive path-based cleanup of the node's specific folder before relaunching to prevent duplicate game instances.
+    * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, forcing the agent to resolve choices before fighting to prevent deadlocks.
+    * **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers, preventing "Thread Collisions" and hard crashes.
     * **Boss-Only Map Proceed:** The map `proceed` button is strictly disabled unless the agent is on a Boss Floor (16, 33, 51), preventing the "Fake Proceed" trap.
     * **Real-Map Verification:** The environment only identifies the screen as "map" if actual navigation nodes are present in the API response.
 * **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs, infinite loops, or **API/State Invalid** errors. It automatically reboots the specific game node and triggers a **Neutral Abort (0.0 reward)** to protect the model's policy.
@@ -54,14 +59,26 @@ If you wish to run more (or fewer) nodes, you must perform the following:
 **This project would be absolutely impossible without the incredible STS2MCP API Mod.** The mod acts as the core bridge, exposing the internal Slay the Spire 2 game state as a JSON payload and accepting external HTTP POST commands. This project relies entirely on this mod to provide the Python RL environment with visibility and control inside the game. 
 **Huge thanks to the creator:** [https://github.com/Gennadiyev/STS2MCP](https://github.com/Gennadiyev/STS2MCP)
 
-### How to Replicate the Cluster
-Because Steam normally restricts running multiple instances of a game, the following manual setup is required:
+### How to Replicate the Cluster for Your Machine
+Since this project runs on local hardware with physical node clones, every new user must perform the following manual setup:
 
-1.  **Clone the Game:** Copy the base `Slay the Spire 2` Steam installation directory to create separate game folders for each node.
-2.  **Bypass Steam Lock:** Inside each cloned folder, create a text file named `steam_appid.txt` and paste the Slay the Spire 2 Steam App ID inside it. This allows the clones to run independently.
-3.  **Differentiate Processes:** To allow the Python orchestrator to kill and restart specific frozen nodes independently, rename the game executable and its associated data file in each folder (e.g., rename `Node 1.exe` and `Node 1.pck`, `Node 2.exe`, etc.). Rename the folders as well (e.g., `STS2_Node_1`, `STS2_Node_2`, etc.).
-4.  **Configure Paths:** Update the hardcoded `base_path` variables in `sts2_env.py` and `train.py` to match the exact directory where your game nodes are located.
-5.  **Configure the API Mod:** Install the STS2MCP mod into each folder. Open the mod's `.conf` file in each respective folder and assign their unique ports.
+1.  **Clone the Game Node Folders:** 
+    *   Navigate to your Steam installation: `...\steamapps\common\SlayTheSpire2`.
+    *   Create 4 identical copies of the folder, naming them `STS2_Node_1`, `STS2_Node_2`, `STS2_Node_3`, and `STS2_Node_4`.
+2.  **Bypass Steam Instance Lock:** 
+    *   Inside each cloned folder, create a text file named `steam_appid.txt` and paste the Slay the Spire 2 Steam App ID (`1932700`) inside it. This allows the clones to run independently.
+3.  **Assign Unique Ports:** 
+    *   Install the **STS2MCP Mod** into every node folder.
+    *   Open the mod's configuration file (`STS2MCP.conf`) in each node and assign a unique port. The defaults in `train.py` are:
+        *   Node 1: **15526**
+        *   Node 2: **15527**
+        *   Node 3: **15528**
+        *   Node 4: **15529** (Evaluation Node)
+4.  **Configure Local Paths in Code:**
+    *   **Environment Paths:** Open `sts2_env.py` and search for the `# MANUAL CONFIG` comment. Update the `base_node_path` variable to point to your new node folders.
+    *   **Training Paths:** Open `train.py` and search for the `# MANUAL CONFIG` comment inside the `make_env` function. Update the `base_path` there as well.
+5.  **Initialize Profiles:** 
+    *   Manually open the game for each node at least once to ensure **3 profiles** are created. The orchestrator uses these to refresh memory and clear ghost saves.
 
 ### 🛡️ Automated Profile Isolation (API Stability)
 To avoid the "Corrupt Save File" API startup error and ensure state integrity during parallel rollouts, the environment **automatically enforces** a unique profile mapping for each node. Slay the Spire 2 supports exactly 3 profiles:
@@ -89,12 +106,30 @@ The environment now includes a multi-layered **Self-Healing** system to handle t
 
 ## ⚙️ Technical Deep Dive
 
-### The State Observation Vector
-The environment translates the raw JSON game state into a massive, flattened observation vector to feed into the neural network:
+### 1. The State Observation Vector (1536 Floats)
+The environment translates the raw JSON game state into a massive, flattened observation vector to feed into the neural network. This allows the model to "see" every aspect of the game state simultaneously:
 * **Observation Space:** `spaces.Box(low=-1.0, high=1.0, shape=(1536,), dtype=np.float32)`
-    * *Includes HP, Block, Energy, Gold, Buffs/Debuffs (20 slots), Orbs, Potions, detailed intent and HP parsing for up to 5 enemies, dense card encoding, Map Nodes, Relics, and even the new Crystal Sphere mechanic.*
-* **Action Space:** `spaces.Discrete(317)` 
-    * *A fully flattened discrete space representing exactly 317 possible interactions.*
+    * **[0-10]**: Core Meta State (Floor, HP Ratio, Gold, current Act, Ascension level).
+    * **[10-20]**: Pile Metadata (Draw, Discard, and Exhaust pile counts).
+    * **[20-50]**: Player Status Effects (Detailed parsing for Strength, Dexterity, Vulnerable, etc.).
+    * **[55-70]**: Orb States (Support for the Defect's unique mechanics).
+    * **[70-120]**: Potion Bar (IDs, usability flags, and slot mapping).
+    * **[120-320]**: Enemy Vision (Entity IDs, HP Ratios, Block, and detailed Intent Damage labels for up to 5 enemies).
+    * **[320-620]**: Hand Vision (Full encoding for 10 cards: ID, Cost, Upgrades, and Keywords like 'Exhaust' or 'Block').
+    * **[620-870]**: Dynamic Screen Logic (Handling Shop item costs, Reward item types, and Relic choice indices).
+    * **[870-1370]**: Full Map Vision (The complete layout of the current act's navigation nodes).
+    * **[1370-1536]**: Specialized States (Support for the Crystal Sphere minigame and Summoned Pets).
+
+### 2. The Action Space (317 Discrete Actions)
+A fully flattened discrete space representing exactly 317 possible interactions, categorized as:
+*   **[0-49]**: `play_card` (Targets for 10 card slots * 5 possible enemies).
+*   **[50-74]**: `use_potion` (5 slots * 5 targets).
+*   **[75-79]**: `discard_potion`.
+*   **[80]**: `end_turn`.
+*   **[124-133]**: `choose_event_option` (Dialogue selections).
+*   **[140-154]**: `shop_purchase` (Merchant inventory).
+*   **[155-159]**: `choose_map_node` (Navigating the Spire).
+*   **[215-316]**: Crystal Sphere minigame grid interaction.
 
 ### Synchronous Training Architecture (Stable Baselines3)
 This project utilizes **Stable Baselines3 (SB3)** to orchestrate the training loop using vectorized environments:
@@ -212,3 +247,24 @@ The project includes built-in diagnostic tools to monitor cluster health, timing
     ```bash
     python debug_cluster.py
     ```
+
+---
+
+## 🛠️ Developer Tuning Guide
+
+To modify the core behavior of the agent or optimize for different hardware, refer to these critical variables:
+
+### 1. Training Dynamics (`train.py`)
+*   **`BUFFER_STAGES`**: A curriculum list where each entry is `(Batch Size, Steps per Update, Max Step)`. 
+    *   *Tip:* If your GPU memory is low, decrease the **Batch Size** (e.g., 3072 -> 1024).
+*   **`ent_coef`**: Controls the entropy coefficient (exploration). 
+    *   *Tip:* Set this to **0.05** for early training (Phase 1-2) to force the agent to try new cards. Decay it to **0.01** in later phases for fine-tuning.
+*   **`learning_rate`**: Fixed at **1e-4** for early acts. If the agent's policy collapses (High `approx_kl`), lower this to **5e-5**.
+
+### 2. Environment Stability (`sts2_env.py`)
+*   **`time.sleep(0.05)`**: The **Stability Throttle**. 
+    *   *Tip:* If the Godot engine crashes during heavy enemy animations, increase this to **0.1s**. If your PC is high-end, you can try lowering it to **0.01s** for extreme SPS.
+*   **`stagnant_steps >= 100`**: The **Deadlock Threshold**. 
+    *   *Tip:* If you are training on high Ascension levels where combat lasts longer, you may need to increase this to **200** to prevent premature reboots.
+*   **`rejection_penalty`**: Currently set to **-1.0**. 
+    *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.

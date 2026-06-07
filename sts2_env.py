@@ -16,7 +16,8 @@ def stable_hash(name, max_val=10000):
     if not name: return 0
     return (int(hashlib.md5(str(name).encode()).hexdigest(), 16) % max_val) + 1
 
-# --- Global Action Space (317 Discrete Actions) ---
+# --- Action Space Mapping ---
+# Maps the neural network's 317 discrete outputs to specific game commands.
 FLAT_ACTIONS = []
 for c in range(10): 
     for t in range(5): FLAT_ACTIONS.append({"action": "play_card", "card_index": c, "target_idx": t})
@@ -42,10 +43,10 @@ FLAT_ACTIONS.extend([{"action": "confirm_bundle_selection"}, {"action": "cancel_
 for r in range(5): FLAT_ACTIONS.append({"action": "select_relic", "index": r})
 FLAT_ACTIONS.append({"action": "skip_relic_selection"})
 for r in range(5): FLAT_ACTIONS.append({"action": "claim_treasure_relic", "index": r})
-# Action Space Stability: 'back' replaces 'abandon' to maintain 317 actions
+
+# 'back' replaces 'abandon' to maintain 317 actions
 MENU_OPTS = ["main_menu", "singleplayer", "standard", "IRONCLAD", "embark", "continue", "yes", "no", "back", "settings"]
 for m in MENU_OPTS: FLAT_ACTIONS.append({"action": "menu_select", "option": m})
-
 
 FLAT_ACTIONS.append({"action": "crystal_sphere_set_tool", "tool": "big"})
 FLAT_ACTIONS.append({"action": "crystal_sphere_set_tool", "tool": "small"})
@@ -65,6 +66,8 @@ class SlayTheSpire2Env(gym.Env):
             node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
             game_path = os.path.join(game_path, f"Node {node_id}.exe")
         
+        # Find the game executable path. 
+        # MANUAL CONFIG: If your game is installed elsewhere, update the base_node_path below.
         if not game_path or not os.path.exists(game_path):
             node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
             base_node_path = f"D:\\Games\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
@@ -121,7 +124,6 @@ class SlayTheSpire2Env(gym.Env):
 
     def _log_action(self, msg, vision=None):
         try:
-            # Trace Rotation (1GB Cap)
             if os.path.exists(self.trace_path) and os.path.getsize(self.trace_path) > 1024 * 1024 * 1024:
                 with open(self.trace_path, "w") as f: 
                     f.write(json.dumps({"ts": str(datetime.datetime.now()), "msg": "--- Trace Rotated ---"}) + "\n")
@@ -178,7 +180,6 @@ class SlayTheSpire2Env(gym.Env):
                     for f in glob.glob(os.path.join(sub, "*")):
                         try:
                             if os.path.isfile(f):
-                                # 1GB Storage Threshold
                                 if full_nuke or os.path.getsize(f) > 1024 * 1024 * 1024:
                                     os.remove(f)
                                 elif not full_nuke and os.path.basename(f).lower() == "godot.log":
@@ -187,32 +188,59 @@ class SlayTheSpire2Env(gym.Env):
                                     os.remove(f)
                         except: pass
 
+    def _nuke_current_run_save(self):
+        """Surgically deletes the current_run.save for the node's profile to force a fresh start."""
+        appdata = os.getenv('APPDATA')
+        if not appdata: return
+        
+        steam_path = os.path.join(appdata, "SlayTheSpire2", "steam")
+        if not os.path.exists(steam_path): return
+        
+        user_dirs = [d for d in os.listdir(steam_path) if d.isdigit()]
+        if not user_dirs: return
+        
+        target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
+        for user_id in user_dirs:
+            save_dir = os.path.join(steam_path, user_id, "modded", f"profile{target_profile}", "saves")
+            if os.path.exists(save_dir):
+                for f in glob.glob(os.path.join(save_dir, "*")):
+                    fname = os.path.basename(f).lower()
+                    # Surgical Protection: NEVER delete progress or prefs (unlocks/settings)
+                    if "progress" in fname or "prefs" in fname:
+                        continue
+                    
+                    # Only delete files related to the active run
+                    if "run" in fname:
+                        try: 
+                            os.remove(f)
+                            print(f"[CLEANUP] Deleted Run File: {os.path.basename(f)} (Profile {target_profile})")
+                        except: pass
+
     def _reboot_game_client(self, reason=None):
         log_reason = reason if reason else self.reboot_reason
-        folder_fragment = os.path.basename(os.path.dirname(self.game_path))
-        print(f"\n[REBOOT] Path-based cleanup on '{folder_fragment}'...")
-        
-        # Absolute path-based force-kill
-        ps_kill = f"Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '*{folder_fragment}*' }} | Stop-Process -Force"
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps_kill], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        try:
-            cmd = f'netstat -ano | findstr LISTENING | findstr :{self.port}'
-            output = subprocess.check_output(cmd, shell=True).decode('utf-8')
-            for line in output.strip().split('\n'):
-                parts = line.split()
-                if len(parts) >= 5:
-                    pid = parts[-1]
-                    if pid != "4": 
-                        subprocess.run(["taskkill", "/F", "/PID", pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except: pass
+        node_id = {15526: 1, 15527: 2, 15528: 3, 15529: 4}.get(self.port, 1)
 
+        # Cleanup: Delete save for every reboot to ensure fresh start
+        self._nuke_current_run_save()
         self._log_reboot(log_reason)
         self.reboot_reason = "Stall/Deadlock Recovery"
-        self._vacuum_disk(full_nuke=False)
+
+        if "Storage Bloat" in str(log_reason):
+            # Full Cluster Purge: Kill all instances to release log file locks
+            print(f"\n[PURGE] Storage bloat detected. Shutting down entire cluster...")
+            ps_kill_all = "Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*Node*' -or $_.Name -like '*SlayTheSpire2*' } | Stop-Process -Force"
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_kill_all], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._vacuum_disk(full_nuke=True)
+        else:
+            # Surgical Reboot: Kill ONLY the specific node's process
+            print(f"\n[REBOOT] Node {node_id} failure. Performing surgical restart...")
+            ps_kill_node = f"Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '*Node_{node_id}*' -or $_.Path -like '*STS2_Node_{node_id}*' }} | Stop-Process -Force"
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_kill_node], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._vacuum_disk(full_nuke=False)
+
         self._get_session(reset=True)
 
-        print(f"[REBOOT] Waiting for Port {self.port} to be released...")
+        # Wait for the game port to be physically released by the OS
         for _ in range(30):
             try:
                 cmd = f'netstat -ano | findstr LISTENING | findstr :{self.port}'
@@ -229,12 +257,12 @@ class SlayTheSpire2Env(gym.Env):
             subprocess.Popen(cmd, cwd=game_dir, shell=True)
         except Exception as e: print(f"[REBOOT] relaunch failed: {e}")
         
-        print(f"[REBOOT] Polling API Port {self.port} for warmup...")
+        # Wait for the game's API to wake up and respond before resuming
         for i in range(60):
             try:
                 resp = requests.get(f"http://127.0.0.1:{self.port}/api/v1/profiles", timeout=1.0)
                 if resp.status_code == 200: 
-                    print(f"[REBOOT] API Online after {i}s."); break
+                    print(f"[REBOOT] Node {node_id} Online after {i}s."); break
             except: pass
             time.sleep(1.0)
 
@@ -248,7 +276,6 @@ class SlayTheSpire2Env(gym.Env):
         battle = state.get("battle", {})
         enemies = battle.get("enemies", [])
         
-        # Priority Classification
         if "hand_select" in state: screen = "hand_select"
         elif any(k in state for k in OVERLAY_KEYS): screen = "card_select_overlay"
         elif len(enemies) > 0 or battle.get("is_play_phase"): screen = "combat"
@@ -277,6 +304,7 @@ class SlayTheSpire2Env(gym.Env):
                     slot_idx = pot.get("slot")
                     if slot_idx is not None and slot_idx < 5: mask[75 + slot_idx] = True
 
+        # Screen-specific masking logic:
         if screen == "combat":
             if battle.get("is_play_phase"):
                 mask[80] = True 
@@ -297,6 +325,7 @@ class SlayTheSpire2Env(gym.Env):
                             for t_idx in range(min(5, len(enemies))): mask[50 + p_slot * 5 + t_idx] = True
                         else: mask[50 + p_slot * 5] = True 
         elif screen == "hand_select":
+            # Cards that need to be manually picked from the hand (e.g. discarding)
             hs = state.get("hand_select", {})
             match = re.search(r'\b(\d+)\b', hs.get("prompt", ""))
             max_select = int(match.group(1)) if match else 1
@@ -311,14 +340,17 @@ class SlayTheSpire2Env(gym.Env):
                 set_mask(81, 10, [c.get("index") for c in hs.get("cards", []) if str(c.get("index")) not in merged_selected])
             if can_confirm or eff_sel >= max_select: mask[91] = True
         elif screen == "rewards":
+            # Standard post-combat or chest rewards
             rew = state.get("rewards", {})
             set_mask(92, 15, [i.get("index") for i in rew.get("items", [])])
             if rew.get("can_proceed") or not rew.get("items"): mask[123] = True
         elif screen == "card_reward":
+            # Picking a new card for the deck
             cr = state.get("card_reward", {})
             set_mask(107, 15, [c.get("index") for c in cr.get("cards", [])])
             if cr.get("can_skip"): mask[122] = True
         elif screen in ["event", "neow"]:
+            # Random encounters and Neow's start-of-game choices
             ev = state.get("event") or state.get("neow") or {}
             opts = ev.get("options", [])
             if ev.get("in_dialogue"): mask[134] = True 
@@ -329,24 +361,27 @@ class SlayTheSpire2Env(gym.Env):
                 if not selectable and not ev.get("in_dialogue"): mask[123] = True
         elif screen in ["room", "unknown"]: mask[123] = True
         elif screen == "rest_site":
+            # Campfire resting and smithing
             rs = state.get("rest_site", {})
             set_mask(135, 5, [o.get("index") for o in rs.get("options", []) if o.get("is_enabled")])
             if rs.get("can_proceed"): mask[123] = True
         elif screen == "shop" or screen == "fake_merchant":
+            # Merchant screens
             shop = state.get("fake_merchant", {}).get("shop", {}) if raw_screen == "fake_merchant" else state.get("shop", {})
             gold = player.get("gold", 0)
             set_mask(140, 15, [i.get("index") for i in shop.get("items", []) if i.get("price", i.get("cost", 9999)) <= gold and i.get("is_stocked")])
             mask[123] = True 
         elif screen == "map":
+            # Navigation between floors
             map_data = state.get("map", {})
             next_nodes = map_data.get("next_options", [])
             selectable_nodes = [o.get("index") for o in next_nodes if o.get("is_selectable", True)]
             set_mask(155, 5, selectable_nodes)
-            # Boss-Only Map Proceed
             is_boss_floor = state.get("run", {}).get("floor", 0) in [16, 33, 51]
             if not selectable_nodes and map_data.get("can_proceed") and is_boss_floor: mask[123] = True
             else: mask[123] = False
         elif screen == "card_select_overlay":
+            # Specialized selection screens (e.g. Scry, Exhaust from deck)
             cs = next((state.get(k, {}) for k in OVERLAY_KEYS if k in state), {})
             prompt = cs.get("prompt", "")
             match = re.search(r'(?:choose|select|pick|to)\s+(\d+)', prompt, re.I)
@@ -371,19 +406,21 @@ class SlayTheSpire2Env(gym.Env):
                 if cs.get("can_cancel"): mask[186] = True
             if cs.get("can_proceed"): mask[123] = True
         elif screen == "bundle_select":
+            # Selection between sets of items
             bs = state.get("bundle_select", {})
             set_mask(187, 5, [b.get("index") for b in bs.get("bundles", [])])
             if bs.get("can_confirm"): mask[192] = True
             if bs.get("can_cancel"): mask[193] = True
         elif screen == "relic_select":
+            # Picking a specific relic reward
             rs = state.get("relic_select", {})
             set_mask(194, 5, [r.get("index") for r in rs.get("relics", [])])
             if rs.get("can_skip"): mask[199] = True
         elif screen == "treasure":
+            # Collecting loot from chest rooms
             set_mask(200, 5, [r.get("index") for r in state.get("treasure", {}).get("relics", [])])
             if state.get("treasure", {}).get("can_proceed"): mask[123] = True
 
-        # Global Options
         opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
         for i, m in enumerate(MENU_OPTS):
             if m.lower() in opts and m.lower() != "settings": mask[205 + i] = True
@@ -403,7 +440,6 @@ class SlayTheSpire2Env(gym.Env):
                 else: mask[123] = True
             else: mask[123] = True
             
-        # Action Cooldowns
         for act_idx, cooldown in self.action_cooldowns.items():
             if cooldown > 0: mask[act_idx] = False
             
@@ -453,10 +489,25 @@ class SlayTheSpire2Env(gym.Env):
             
             opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
             if menu == "main":
+                target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
+                
+                # Ghost Save Recovery: If 'continue' exists but we nuked the save, toggle profiles to refresh cache
+                if "continue" in opts:
+                    alt_profile = 2 if target_profile == 1 else 1
+                    profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
+                    try:
+                        print(f"[CLEANUP] Ghost save detected on Profile {target_profile}. Toggling to Profile {alt_profile} to refresh...")
+                        self._get_session().post(profile_url, json={"action": "switch", "profile_id": alt_profile}, timeout=5.0)
+                        time.sleep(1.0)
+                        self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
+                        time.sleep(1.0)
+                        self._post({"action": "proceed"})
+                        continue
+                    except: pass
+
                 try:
                     profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
                     resp = self._get_session().get(profile_url, timeout=5.0).json()
-                    target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
                     if resp.get("current_profile_id") != target_profile:
                         self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
                         self._post({"action": "proceed"}); continue
@@ -482,7 +533,7 @@ class SlayTheSpire2Env(gym.Env):
                 else: self._post({"action": "proceed"})
             elif screen == "neow": self._post({"action": "choose_event_option", "index": 0})
             else: self._post({"action": "proceed"})
-            time.sleep(0.01)
+            time.sleep(0.5)
         self._reboot_game_client(reason="API Startup Timeout"); return self._ensure_fresh_run()
 
     def _flatten_state(self, state):
@@ -592,12 +643,16 @@ class SlayTheSpire2Env(gym.Env):
         for k in list(self.action_cooldowns.keys()):
             self.action_cooldowns[k] -= 1
             if self.action_cooldowns[k] <= 0: del self.action_cooldowns[k]
-        if self.total_episode_steps % 25 == 0:
-            appdata = os.getenv('APPDATA')
-            if appdata:
-                log_path = os.path.join(appdata, "SlayTheSpire2", "logs", "godot.log")
-                if os.path.exists(log_path) and os.path.getsize(log_path) > 1024 * 1024 * 1024:
-                    self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
+        
+        # Aggressive Storage Bloat Check
+        appdata = os.getenv('APPDATA')
+        if appdata:
+            log_path = os.path.join(appdata, "SlayTheSpire2", "logs", "godot.log")
+            if os.path.exists(log_path) and os.path.getsize(log_path) > 1024 * 1024 * 1024:
+                self.reboot_reason = "Storage Bloat (>1GB)"
+                self.needs_reboot = True
+                return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
+
         fresh_state = self._raw_state()
         if fresh_state: self.current_state = fresh_state
         if self.current_state.get("state_type") == "menu" and self.current_state.get("menu_screen") == "popup":
@@ -605,10 +660,12 @@ class SlayTheSpire2Env(gym.Env):
             if "corrupt" in msg or "not able to load" in msg:
                 self.reboot_reason = f"Engine Bug: {msg}"; self.needs_reboot = True
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
-        # 100-Step Reboot
+
+        # Hard deadlock failsafe: reset if no progress for 100 steps
         if self.stagnant_steps >= 100:
             self.reboot_reason = "Deadlock (100 Steps)"; self.needs_reboot = True
-            return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor, "deadlock": True}
+            # Void reward to prevent training on technical failures
+            return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "reboot_void": True}
         
         payload = FLAT_ACTIONS[int(action_idx)].copy()
         raw_screen = self.current_state.get("state_type", "unknown")
@@ -616,7 +673,6 @@ class SlayTheSpire2Env(gym.Env):
         battle = self.current_state.get("battle", {})
         enemies_data = battle.get("enemies", [])
         
-        # Priority Classification
         if "hand_select" in self.current_state: screen = "hand_select"
         elif any(k in self.current_state for k in OVERLAY_KEYS): screen = "card_select_overlay"
         elif enemies_data or battle.get("is_play_phase"): screen = "combat"
@@ -636,14 +692,13 @@ class SlayTheSpire2Env(gym.Env):
             self._log_action(f"-> SMART-KICK: {payload.get('action')}")
         elif rejected:
             self._log_action(f"-> REJECTED: Masked.")
-            if self.total_episode_steps >= 1500: self.needs_reboot = True; return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
+            if self.total_episode_steps >= 1500: self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "reboot_void": True}
             self.stagnant_steps += 1; return self._flatten_state(self.current_state), -1.0, False, False, {"floor": self.previous_floor}
         else: payload = FLAT_ACTIONS[int(action_idx)].copy()
 
         if is_autokick: self.state_rejection_count, self.stagnant_steps = 0, 0
         else: self._log_action(f"[Floor {self.current_state.get('run',{}).get('floor',0)} | {screen}] Attempting: {payload}", vision=vision)
 
-        # Targets
         if payload.get("action") == "play_card":
             hand = player.get("hand", [])
             if (c_idx := payload.get("card_index")) is not None and c_idx < len(hand):
@@ -662,7 +717,6 @@ class SlayTheSpire2Env(gym.Env):
         time.sleep(0.05) # 50ms Stability Throttle
         new_state = self._raw_state()
         
-        # Dynamic Screen Transition Polling
         if payload.get("action") in ["choose_map_node", "proceed"]:
             old_screen = self.current_state.get("state_type")
             for _ in range(40): 
@@ -673,7 +727,7 @@ class SlayTheSpire2Env(gym.Env):
             time.sleep(0.05); new_state = self._raw_state()
             if not new_state:
                 self.reboot_reason = "API Invalid"; self.needs_reboot = True
-                return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
+                return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "reboot_void": True}
 
         if payload.get("action") in ["play_card", "use_potion"]: self.action_cooldowns[action_idx] = 5
         elif payload.get("action") in ["shop_purchase", "choose_rest_option"]: self.action_cooldowns[action_idx] = 10
@@ -681,7 +735,6 @@ class SlayTheSpire2Env(gym.Env):
         if payload.get("action") == "select_card": self.internal_selection_history.append(payload.get("index"))
         elif payload.get("action") in ["confirm_selection", "proceed", "cancel_selection"]: self.internal_selection_history = []
 
-        # Wait Phase
         if new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
             for _ in range(100):
                 time.sleep(0.05); new_state = self._raw_state()
@@ -740,7 +793,7 @@ class SlayTheSpire2Env(gym.Env):
                 self.lowest_enemy_hp_seen[e_key] = e_hp
         if not enemies_now: self.lowest_enemy_hp_seen = {}
 
-        # Stagnation Progress
+        # Stagnation check: Detect if the agent is stuck in a loop or menu
         curr_hp_sum = sum(e.get("hp", 0) for e in enemies_now) + player_now.get("hp", 0)
         hard_prog = (floor_now != self.last_prog_floor or 
                      curr_hp_sum != self.last_prog_hp_sum or 
@@ -774,7 +827,7 @@ class SlayTheSpire2Env(gym.Env):
 
         if self.total_episode_steps >= 1500:
             self.reboot_reason = "Timeout (1500 Steps)"; self.needs_reboot = True
-            return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
+            return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "reboot_void": True}
 
         reward = sum(b_breakdown.values())
         if new_screen == "game_over":
@@ -802,4 +855,3 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_energy, self.last_prog_player_block, self.last_prog_deck_size = -1, -1, -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
         self.lowest_enemy_hp_seen = {}; return self._flatten_state(state), {}
-

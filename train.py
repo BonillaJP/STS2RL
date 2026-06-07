@@ -70,6 +70,8 @@ SESSION_ID = int(time.time())
 TRAIN_PORTS = [15526, 15527, 15528]
 EVAL_PORT = 15529
 
+# --- Curriculum Stages ---
+# Training is split into stages (Batch Size, Steps per Update, Max Steps) to balance speed and stability.
 BUFFER_STAGES = [
     (1024, 256, 18_432), 
     (3072, 512, 100_000_000)
@@ -77,6 +79,8 @@ BUFFER_STAGES = [
 
 PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 
+# --- Neural Network Architecture ---
+# SynergyCNNExtractor: Uses 1D Convolution to 'scan' card hands for combos and relic patterns.
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
         super().__init__(observation_space, features_dim=1152)
@@ -100,6 +104,7 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
         self.final_dense = nn.Sequential(nn.Linear(1280 + 640 + 512, 1152), nn.ReLU())
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
+        # Split the observation vector into its logical components (meta, cards, relics)
         meta_1 = observations[:, :320]
         hand_flat = observations[:, 320:620]
         meta_2 = observations[:, 620:770]
@@ -107,11 +112,13 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
         meta_3 = observations[:, 870:]
         
         metadata = th.cat([meta_1, meta_2, meta_3], dim=1)
+        # Reshape data for the CNN branches (Batch, Channels, Length)
         hand_spatial = hand_flat.view(-1, 10, 30).transpose(1, 2)
         relic_spatial = relic_flat.view(-1, 20, 5).transpose(1, 2)
         
         return self.final_dense(th.cat([self.hand_cnn(hand_spatial), self.relic_cnn(relic_spatial), self.meta_processor(metadata)], dim=1))
 
+# Performance Tracker: Saves the all-time best scores and Hall of Fame models
 class GlobalPerformanceTracker:
     def __init__(self):
         self.best_reward, self.best_floor, self.hof_entries = -1000.0, 0, []
@@ -632,6 +639,7 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
 def make_env(port, is_eval=False):
     def _init():
         node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
+        # MANUAL CONFIG: Set this base_path to match your local Slay the Spire 2 node directory
         base_path = f"D:\\Games\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
         data_dir = f"Node{node_id}_Data"
         base_env = SlayTheSpire2Env(port=port, game_path=base_path, user_data_dir=data_dir, force_fresh=False, is_eval=is_eval)
