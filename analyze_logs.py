@@ -67,7 +67,24 @@ def generate_report():
     else:
         print("- Stats: No training data found in monitor logs.")
 
-    df_prog = read_csv_safe(PROGRESS_CSV, skip_header=False)
+    # 1. Aggressive Progress Search (Master + Sessions)
+    all_progs = []
+    if os.path.exists(PROGRESS_CSV) and os.path.getsize(PROGRESS_CSV) > 0:
+        try: all_progs.append(pd.read_csv(PROGRESS_CSV))
+        except: pass
+    
+    session_files = glob.glob(os.path.join(TECH_DIR, "session_*", "progress.csv"))
+    for f in session_files:
+        if os.path.exists(f) and os.path.getsize(f) > 0:
+            try: all_progs.append(pd.read_csv(f))
+            except: pass
+            
+    df_prog = pd.DataFrame()
+    if all_progs:
+        df_prog = pd.concat(all_progs, ignore_index=True)
+        if 'time/total_timesteps' in df_prog.columns:
+            df_prog = df_prog.drop_duplicates(subset=['time/total_timesteps'], keep='last').sort_values(by='time/total_timesteps')
+
     if not df_prog.empty:
         latest = df_prog.iloc[-1]
         print(f"- SB3 Rollout: fps: {latest.get('time/fps', 0):.1f} | iterations: {latest.get('time/iterations', 0)} | elapsed: {latest.get('time/time_elapsed', 0)/60:.1f}m")

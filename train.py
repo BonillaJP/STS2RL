@@ -20,9 +20,6 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.logger import configure
 import sys
 
-# ==============================================================================
-# CONSOLE MIRROR LOGGER (Tee Utility)
-# ==============================================================================
 class TeeLogger:
     def __init__(self, filename, mode="a", max_mb=50):
         self.filename = filename
@@ -67,7 +64,6 @@ MODEL_DIR = "./models/"
 ULTIMATE_BEST_DIR = os.path.join(MODEL_DIR, "ultimate_best")
 TOP_MODELS_DIR = os.path.join(MODEL_DIR, "top_3")
 HOF_DIR = os.path.join(MODEL_DIR, "hall_of_fame")
-VICTORY_SEEDS_FILE = os.path.join(LOG_DIR, "victory_seeds.json")
 
 SESSION_ID = int(time.time())
 
@@ -85,7 +81,6 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
         super().__init__(observation_space, features_dim=1152)
         
-        # Branch 1: 1D-CNN for hand synergy (Cost, Damage, Enchants)
         self.hand_cnn = nn.Sequential(
             nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -94,28 +89,23 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
             nn.Flatten()
         )
         
-        # Branch 2: 1D-CNN for relic synergies
         self.relic_cnn = nn.Sequential(
             nn.Conv1d(in_channels=5, out_channels=32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten()
         )
         
-        # Branch 3: Metadata processor (Player HP, Gold, Floor)
         self.meta_processor = nn.Sequential(nn.Linear(1136, 512), nn.ReLU())
         
-        # Branch 4: Final dense integration
         self.final_dense = nn.Sequential(nn.Linear(1280 + 640 + 512, 1152), nn.ReLU())
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
-        # State Vector Slicing
         meta_1 = observations[:, :320]
         hand_flat = observations[:, 320:620]
         meta_2 = observations[:, 620:770]
         relic_flat = observations[:, 770:870]
         meta_3 = observations[:, 870:]
         
-        # Spatial Reshaping for CNNs
         metadata = th.cat([meta_1, meta_2, meta_3], dim=1)
         hand_spatial = hand_flat.view(-1, 10, 30).transpose(1, 2)
         relic_spatial = relic_flat.view(-1, 20, 5).transpose(1, 2)
@@ -190,7 +180,6 @@ def synchronize_logs(current_step, checkpoint_path=None):
             
     if combined_progress:
         master_df = pd.concat(combined_progress, ignore_index=True)
-        # Drop duplicates based on the 'time/total_timesteps' column, keeping the last (most recent) entry
         if 'time/total_timesteps' in master_df.columns:
             master_df = master_df.drop_duplicates(subset=['time/total_timesteps'], keep='last')
             master_df = master_df.sort_values(by=['time/total_timesteps'])
@@ -263,29 +252,39 @@ def synchronize_logs(current_step, checkpoint_path=None):
             if cleaned_count > 0: status += f" and cleaned {cleaned_count} ghost runs"
             print(f"  > Port {port}: {status}. Master log established.")
 
-    all_junk = glob.glob(os.path.join(LOG_DIR, "*tfevents*")) + glob.glob(os.path.join(LOG_DIR, "*monitor*"))
-    for path in all_junk:
-        if "master" in path or os.path.isdir(path): continue
-        try:
-            if os.path.getsize(path) < 150:
-                os.remove(path)
-        except: pass
-
 class TensorboardMetricsCallback(BaseCallback):
     def __init__(self, tracker, verbose=0):
         super().__init__(verbose)
         self.tracker, self.counter_file = tracker, os.path.join(LOG_DIR, "run_counter.json")
         self.episode_count = self._load_counter()
+        self.pending_hof_save = False
+        self.pending_hof_reward = -1000.0
+
     def _load_counter(self):
         if os.path.exists(self.counter_file):
             try:
                 with open(self.counter_file, "r") as f: return json.load(f).get("count", 0)
             except: return 0
         return 0
+
     def _save_counter(self):
         try:
             with open(self.counter_file, "w") as f: json.dump({"count": self.episode_count}, f)
         except: pass
+
+    def _on_rollout_start(self) -> None:
+        if self.pending_hof_save:
+            reward = self.pending_hof_reward
+            hof_path = os.path.join(HOF_DIR, f"hof_score_{int(reward)}_step_{self.model.num_timesteps}.zip")
+            hof_vec_path = hof_path.replace(".zip", ".pkl")
+            self.model.save(hof_path)
+            norm_env = unwrap_vec_normalize(self.training_env)
+            if norm_env: norm_env.save(hof_vec_path)
+            self.tracker.add_hof(reward, hof_path)
+            print(f"[HALL OF FAME] Record Verified! Updated Brain (Score: {reward:.1f}) saved to gallery.")
+            self.pending_hof_save = False
+            self.pending_hof_reward = -1000.0
+
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
             if "episode" in info:
@@ -295,18 +294,14 @@ class TensorboardMetricsCallback(BaseCallback):
                 reward = info["episode"]["r"]
                 
                 if reward > self.tracker.best_reward:
-                    hof_path = os.path.join(HOF_DIR, f"hof_score_{int(reward)}_step_{self.model.num_timesteps}.zip")
-                    hof_vec_path = hof_path.replace(".zip", ".pkl")
-                    self.model.save(hof_path)
-                    norm_env = unwrap_vec_normalize(self.training_env)
-                    if norm_env: norm_env.save(hof_vec_path)
-                    self.tracker.add_hof(reward, hof_path)
-                    print(f"[HALL OF FAME] New Record! Score: {reward:.1f} saved to gallery.")
-
+                    self.pending_hof_save = True
+                    self.pending_hof_reward = max(self.pending_hof_reward, reward)
+                
                 self.tracker.update(reward, floor)
                 timestamp = datetime.datetime.now().strftime("%H:%M:%S")
                 print(f"[{timestamp}] RUN #{self.episode_count} | Floor: {floor} | Rew: {reward:.1f} (Best: {self.tracker.best_floor})")
         return True
+
 
 class CustomProgressBarCallback(BaseCallback):
     def __init__(self, total_timesteps, phase_manager, tracker, verbose=0):
@@ -421,7 +416,7 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        promo_reward_targets = {1: 100.0, 2: 325.0, 3: 550.0, 4: 500.0, 5: 450.0, 6: 400.0}
+        promo_reward_targets = {1: 200.0, 2: 450.0, 3: 700.0, 4: 650.0, 5: 600.0, 6: 550.0}
         promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0, 4: 51.0, 5: 51.0, 6: 51.0}
         exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51, 5: 51, 6: 51}
         
@@ -539,21 +534,21 @@ class PhaseManagerCallback(BaseCallback):
             self.best_mean_reward = mean_reward_final
             self.consecutive_regressions = 0
             self.consecutive_failures = 0
-            
-            ultimate_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_phase_{self.phase_idx}.zip")
-            ultimate_vec = ultimate_path.replace(".zip", ".pkl")
-            ultimate_report = ultimate_path.replace(".zip", "_stats.txt")
-            
-            self.model.save(ultimate_path)
-            norm_env = unwrap_vec_normalize(self.training_env)
-            if norm_env: norm_env.save(ultimate_vec)
-            shutil.copy(latest_stats_path, ultimate_report)
-            print(f"[PROMOTION] All-Time Best for Phase {self.phase_idx} updated!")
-        
-        # Phase Advancement Logic
+            print(f"[EXAM] Phase Personal Best broken! New Target: {mean_reward_final:.2f}")
+
         if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= promo_floor_targets.get(self.phase_idx, 99):
             if self.phase_idx < 6:
                 print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
+                
+                ultimate_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_phase_{self.phase_idx}.zip")
+                ultimate_vec = ultimate_path.replace(".zip", ".pkl")
+                ultimate_report = ultimate_path.replace(".zip", "_stats.txt")
+                
+                self.model.save(ultimate_path)
+                norm_env = unwrap_vec_normalize(self.training_env)
+                if norm_env: norm_env.save(ultimate_vec)
+                shutil.copy(latest_stats_path, ultimate_report)
+                
                 self.phase_idx += 1
                 self.best_mean_reward = -1000.0
                 self.consecutive_regressions = 0
@@ -569,7 +564,7 @@ class PhaseManagerCallback(BaseCallback):
                     print(f"[DEMOTION] Policy collapse detected. Stepping down to Phase {self.phase_idx-1}...")
                     self.phase_idx -= 1
                     self.consecutive_failures = 0
-                    self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 5.0 
+                    self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 25.0 
                     self._apply_phase()
         
         self.save_state()
@@ -669,7 +664,6 @@ def main():
                     if os.path.isfile(f): os.remove(f)
                 except: pass
 
-    # Initialize Console Mirror
     console_log_path = os.path.join(LOG_DIR, "train_console.log")
     sys.stdout = TeeLogger(console_log_path, mode="a")
     sys.stderr = TeeErrorLogger(console_log_path, mode="a")

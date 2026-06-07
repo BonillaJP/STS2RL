@@ -100,6 +100,8 @@ class SlayTheSpire2Env(gym.Env):
         self.global_step = 0
         self.last_state_hash = ""
         self.state_action_counts = {} 
+        self.action_cooldowns = {}
+        self.state_rejection_count = 0
         self._vacuum_disk(full_nuke=True)
         
         self.trace_path = f"logs/node_trace_{self.port}.jsonl"
@@ -163,7 +165,7 @@ class SlayTheSpire2Env(gym.Env):
                     for f in glob.glob(os.path.join(sub, "*")):
                         try:
                             if os.path.isfile(f):
-                                # Delete if full nuke, or if file is ballooning (> 50MB)
+                                # Delete if full nuke or > 200MB bloat
                                 if full_nuke or os.path.getsize(f) > 200 * 1024 * 1024:
                                     os.remove(f)
                                 elif not full_nuke and os.path.basename(f).lower() == "godot.log":
@@ -238,12 +240,14 @@ class SlayTheSpire2Env(gym.Env):
         time.sleep(30.0)
 
     def action_masks(self):
-        fresh_state = self._raw_state()
-        if fresh_state: self.current_state = fresh_state
         state = self.current_state
         mask = np.zeros(len(FLAT_ACTIONS), dtype=bool)
         if not state: return mask
         
+        # Action Cooldowns
+        for act_idx, cooldown in self.action_cooldowns.items():
+            if cooldown > 0: mask[act_idx] = False
+
         raw_screen = state.get("state_type", "unknown")
         player = state.get("player", {})
         battle = state.get("battle", {})
@@ -305,17 +309,21 @@ class SlayTheSpire2Env(gym.Env):
             if "selected_cards" in hs: raw_sel.extend(hs.get("selected_cards", []))
             if "selected" in hs: raw_sel.extend(hs.get("selected", []))
             
-            selected_indices = [str(c.get("index", c)) for c in raw_sel if c is not None]
-            if not selected_indices: 
-                selected_indices = [str(c.get("index")) for c in hs.get("cards", []) if (c.get("is_selected", False) or c.get("is_chosen", False) or c.get("selected", False) or c.get("isSelected", False) or c.get("isChosen", False))]
+            api_sel = set(str(c.get("index", c)) for c in raw_sel if c is not None)
+            if not api_sel:
+                api_sel = set(str(c.get("index")) for c in hs.get("cards", []) if (c.get("is_selected", False) or c.get("isSelected", False)))
             
-            effectively_selected = len(selected_indices)
+            mem_sel = set(map(str, self.internal_selection_history))
+            merged_selected = api_sel | mem_sel
+            
+            effectively_selected = len(merged_selected)
             if can_confirm and max_select == 1: effectively_selected = 1
             
             if effectively_selected < max_select:
-                selectable = [c.get("index") for c in hs.get("cards", []) if str(c.get("index")) not in selected_indices]
+                selectable = [c.get("index") for c in hs.get("cards", []) if str(c.get("index")) not in merged_selected]
                 set_mask(81, 10, selectable)
-            if can_confirm: mask[91] = True
+            
+            if can_confirm or effectively_selected >= max_select: mask[91] = True
         elif screen == "rewards":
             rew = state.get("rewards", {})
             set_mask(92, 15, [i.get("index") for i in rew.get("items", [])])
@@ -355,11 +363,14 @@ class SlayTheSpire2Env(gym.Env):
             set_mask(140, 15, [i.get("index") for i in shop.get("items", []) if i.get("price", i.get("cost", 9999)) <= gold and i.get("is_stocked")])
             mask[123] = True 
         elif screen == "map":
-            set_mask(155, 5, [o.get("index") for o in state.get("map", {}).get("next_options", []) if o.get("is_selectable", True)])
+            next_nodes = state.get("map", {}).get("next_options", [])
+            set_mask(155, 5, [o.get("index") for o in next_nodes if o.get("is_selectable", True)])
+            if not next_nodes and state.get("map", {}).get("can_proceed"): mask[123] = True
+            else: mask[123] = False
         elif screen == "card_select_overlay":
             cs = next((state.get(k, {}) for k in OVERLAY_KEYS if k in state), {})
             prompt = cs.get("prompt", "")
-            match = re.search(r'\b(\d+)\b', prompt)
+            match = re.search(r'(?:choose|select|pick|to)\s+(\d+)', prompt, re.I)
             max_sel = int(match.group(1)) if match else 1
             
             raw_sel = []
@@ -369,28 +380,31 @@ class SlayTheSpire2Env(gym.Env):
             
             selected_indices = [str(c.get("index", c)) for c in raw_sel if c is not None]
             if not selected_indices: 
-                selected_indices = [str(c.get("index")) for c in cs.get("cards", []) if (c.get("is_selected", False) or c.get("is_chosen", False) or c.get("selected", False) or c.get("isSelected", False) or c.get("isChosen", False))]
+                selected_indices = [str(c.get("index")) for c in cs.get("cards", []) if (c.get("is_selected", False) or c.get("isSelected", False))]
             
             num_selected = len(selected_indices)
-            # Grid Screens use 'can_confirm' field in API
-            is_grid = "can_confirm" in cs
+            is_grid = cs.get("screen_type") in ["transform", "upgrade", "select", "simple_select"] or "can_confirm" in cs
             
             if is_grid:
                 can_confirm = cs.get("can_confirm", False)
                 if num_selected < max_sel:
-                    merged_selected = set(selected_indices) | set(map(str, self.internal_selection_history))
+                    api_sel = set(selected_indices)
+                    mem_sel = set(map(str, self.internal_selection_history))
+                    merged_selected = api_sel | mem_sel
+                    
                     if len(merged_selected) < max_sel:
                         valid_indices = [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in merged_selected]
                         set_mask(160, 25, valid_indices)
                 
                 if can_confirm or num_selected >= max_sel:
                     mask[185] = True
+                
+                if num_selected > 0: mask[186] = False
+                elif cs.get("can_cancel"): mask[186] = True
             else:
                 valid_indices = [c.get("index") for c in cs.get("cards", [])]
                 set_mask(160, 25, valid_indices)
-
-            if cs.get("can_cancel"): mask[186] = True
-            # Strictly NO proceed (123) unless specifically allowed by overlay
+                if cs.get("can_cancel"): mask[186] = True
             if cs.get("can_proceed"): mask[123] = True
 
         elif screen == "bundle_select":
@@ -421,9 +435,10 @@ class SlayTheSpire2Env(gym.Env):
             if count >= 10:
                 mask[act_idx] = False 
 
-        if not mask.any():
+        if not mask.any() or getattr(self, 'state_rejection_count', 0) >= 20:
             if screen in ["monster", "elite", "boss", "combat"]: mask[80] = True
-            elif screen not in ["map", "event", "hand_select", "neow", "card_select_overlay"]: mask[123] = True
+            else: mask[123] = True
+
         return mask
 
     def _post(self, payload):
@@ -505,14 +520,14 @@ class SlayTheSpire2Env(gym.Env):
         obs = np.zeros(1536, dtype=np.float32)
         if not state: return obs
         
-        # 1. Screen and Act Metadata
+        # Screen and Act Metadata
         screen_map = {"monster": 1, "elite": 2, "boss": 3, "map": 4, "event": 5, "rest_site": 6, "rewards": 7, "card_reward": 8, "shop": 9, "neow": 10, "game_over": 11, "treasure": 12, "hand_select": 13, "card_select": 14, "enchanting": 14, "enchant": 14, "transform": 14, "simple_select": 14, "choose": 14, "upgrade_select": 14, "remove": 14, "menu": 18, "crystal_sphere": 19}
         st_type = state.get("state_type", "")
         obs[0] = screen_map.get(st_type, 0) / 20.0
         run, player = state.get("run", {}), state.get("player", {})
         obs[1], obs[2], obs[3] = run.get("act", 1)/5.0, run.get("floor", 0)/100.0, run.get("ascension", 0)/20.0
         
-        # 2. Player Stats and Statuses
+        # Player Stats and Statuses
         max_hp = max(player.get("max_hp", 1), 1)
         obs[4], obs[5], obs[6], obs[7] = player.get("hp", 0)/max_hp, max_hp/150.0, player.get("block", 0)/100.0, player.get("gold", 0)/1000.0
         obs[8], obs[9] = player.get("energy", 0)/10.0, player.get("max_energy", 3)/10.0
@@ -521,14 +536,14 @@ class SlayTheSpire2Env(gym.Env):
         core_statuses = ["Strength", "Dexterity", "Vulnerable", "Weak", "Frail", "No-Draw", "Entangled", "Artifact", "Barricade", "Dark Embrace", "Feel No Pain", "Corruption", "Evolve", "Fire Breathing", "Juggernaut", "Rupture"]
         for i, s_id in enumerate(core_statuses): obs[20 + i] = status.get(s_id, 0) / 10.0
         
-        # 3. Orbs and Potions
+        # Orbs and Potions
         obs[50], obs[51] = player.get("stars", 0) / 10.0, player.get("orb_slots", 0) / 10.0
         for i, orb in enumerate(player.get("orbs", [])[:10]): obs[55 + i] = stable_hash(orb.get("id")) / 10000.0
         for i, pot in enumerate(player.get("potions", [])[:5]):
             base = 70 + (i * 10)
             obs[base], obs[base+1] = stable_hash(pot.get("id")) / 10000.0, (1.0 if pot.get("can_use_in_combat") else 0.0)
         
-        # 4. Enemy Information
+        # Enemy Information
         enemies = state.get("battle", {}).get("enemies", [])
         for i, enemy in enumerate(enemies[:5]):
             base = 120 + (i * 40)
@@ -541,7 +556,7 @@ class SlayTheSpire2Env(gym.Env):
                     obs[base+4] = dmg / 50.0
                 except: pass
         
-        # 5. Card Encoding (Hand/Rewards/Overlays)
+        # Card Encoding (Hand/Rewards/Overlays)
         def encode_card(card, base_idx):
             if not card: return
             c_id = card.get("id") or card.get("card_id")
@@ -635,11 +650,15 @@ class SlayTheSpire2Env(gym.Env):
     def step(self, action_idx):
         self.total_episode_steps += 1
         
-        # 1. Real-time Storage Failsafe (Monitor Godot Log Bloat)
+        for k in list(self.action_cooldowns.keys()):
+            self.action_cooldowns[k] -= 1
+            if self.action_cooldowns[k] <= 0: del self.action_cooldowns[k]
+
         if self.total_episode_steps % 25 == 0:
             appdata = os.getenv('APPDATA')
             if appdata:
                 log_path = os.path.join(appdata, "SlayTheSpire2", "logs", "godot.log")
+                # Storage failsafe (> 200MB bloat)
                 if os.path.exists(log_path) and os.path.getsize(log_path) > 200 * 1024 * 1024:
                     self._log_action(f"Storage Bloat Detected ({os.path.getsize(log_path)/1024/1024:.1f} MB). Triggering Failsafe.")
                     self.reboot_reason = "Storage Bloat Failsafe (Godot Loop)"
@@ -688,16 +707,37 @@ class SlayTheSpire2Env(gym.Env):
         if enemies_data: vision_summary["enemies"] = [f"{e.get('id', 'unk')} (HP:{e.get('hp',0)} B:{e.get('block',0)})" for e in enemies_data]
         
         floor = self.current_state.get("run", {}).get("floor", 0)
-        self._log_action(f"[Floor {floor} | {screen}] Attempting: {payload}", vision=vision_summary)
-
-        if not self.action_masks()[action_idx]:
-            self._log_action(f"-> REJECTED: Action masked (Invalid). Penalty: -5.0")
+        
+        is_autokick = False
+        rejected = not self.action_masks()[action_idx]
+        if rejected: self.state_rejection_count += 1
+        
+        if self.state_rejection_count >= 20 or self.stagnant_steps >= 40:
+            is_autokick = True
+            m = self.action_masks()
+            valid_actions = [i for i, val in enumerate(m) if val]
+            if valid_actions: action_idx = valid_actions[0]
+            else: action_idx = 80 if screen in ["monster", "elite", "boss", "combat"] else 123
+            
+            payload = FLAT_ACTIONS[action_idx].copy()
+            self._log_action(f"-> SMART-KICK: Stall broken ({self.state_rejection_count} rejections / {self.stagnant_steps} stagnant). Executing: {payload.get('action')}")
+        elif rejected:
+            self._log_action(f"-> REJECTED: Action masked (Invalid). Penalty: -1.0")
             if self.total_episode_steps >= 1500: 
                 self.reboot_reason = "Timeout (Invalid Action Loop)"
                 self.needs_reboot = True
                 return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
-            self.stagnant_steps += 1; time.sleep(0.05); return self._flatten_state(self.current_state), -5.0, False, False, {"floor": self.previous_floor}
-        
+            self.stagnant_steps += 1; return self._flatten_state(self.current_state), -1.0, False, False, {"floor": self.previous_floor}
+        else:
+            payload = FLAT_ACTIONS[int(action_idx)].copy()
+
+        if is_autokick:
+            self.state_rejection_count = 0
+            self.stagnant_steps = 0
+        else:
+            self._log_action(f"[Floor {floor} | {screen}] Attempting: {payload}", vision=vision_summary)
+
+        # Resolve Targets
         if payload.get("action") == "play_card":
             card_idx = payload.get("card_index")
             hand = player.get("hand", [])
@@ -718,15 +758,20 @@ class SlayTheSpire2Env(gym.Env):
                     payload["target"] = enemies[t_idx].get("entity_id")
             if "target_idx" in payload: del payload["target_idx"]
         
+        # Execute Action
         valid = self._post(payload)
         new_state = self._raw_state()
-        if not valid or not new_state: 
+        if not valid or not new_state:
             time.sleep(0.05); new_state = self._raw_state()
-            if not new_state: 
+            if not new_state:
                 self.reboot_reason = "API/State Invalid"
                 self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
+        if payload.get("action") in ["play_card", "use_potion"]:
+            self.action_cooldowns[action_idx] = 5
+
         self.state_action_counts[action_idx] = self.state_action_counts.get(action_idx, 0) + 1
+
         if payload.get("action") == "select_card":
             self.internal_selection_history.append(payload.get("index"))
         elif payload.get("action") in ["confirm_selection", "proceed", "cancel_selection"]:
@@ -745,13 +790,14 @@ class SlayTheSpire2Env(gym.Env):
                 self.needs_reboot = True
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
         
+        b_breakdown = {"floor": 0.0, "dmg": 0.0, "hp": 0.0, "bounty": 0.0, "tax": 0.0}
+
         obs = self._flatten_state(new_state)
         new_screen, floor_now = new_state.get("state_type", ""), new_state.get("run", {}).get("floor", 0)
         if new_state.get("run", {}).get("is_victory", False): floor_now = 51
         player_now, reward, terminated = new_state.get("player", {}), 0.0, False
         p = self.training_phase
-        p = self.training_phase
-        f_b, b_b, e_b, s_b = 5.0, 100.0, 30.0, 15.0
+        f_b, b_b, e_b, s_b = 10.0, 100.0, 30.0, 15.0
         hp_m = {1: 0.1, 2: 0.15, 3: 0.2, 4: 0.4, 5: 0.6}.get(p, 0.8)
         
         hp_before, hp_after = self.previous_hp, player_now.get("hp", 0)
@@ -769,51 +815,86 @@ class SlayTheSpire2Env(gym.Env):
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
         if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
 
-        reward -= 0.01 
-        if self.stagnant_steps > 50: reward -= 20.0
-        elif self.stagnant_steps > 30: reward -= 5.0
-        elif self.stagnant_steps > 15: reward -= 2.0
+        if payload.get("action") == "end_turn":
+            self.combat_turn_count += 1
+            # Wait for turn end
+            for _ in range(100):
+                time.sleep(0.1)
+                temp_state = self._raw_state()
+                if not temp_state: continue
+                if temp_state.get("battle", {}).get("is_play_phase") or temp_state.get("state_type") != "monster":
+                    new_state = temp_state
+                    break
+            else: new_state = self._raw_state()
+        if new_screen in ["monster", "elite", "boss"] and self.last_prog_screen not in ["monster", "elite", "boss"]:
+            self.combat_turn_count = 0
+
+        b_breakdown["tax"] -= 0.01 
+        if self.combat_turn_count > 20: b_breakdown["tax"] -= (self.combat_turn_count - 20) * 0.1
+        
+        if self.stagnant_steps > 50: b_breakdown["tax"] -= 20.0
+        elif self.stagnant_steps > 30: b_breakdown["tax"] -= 5.0
+        elif self.stagnant_steps > 15: b_breakdown["tax"] -= 2.0
+
         if floor_now > self.previous_floor:
-            reward += f_b
-            if self.pending_boss_bounty: reward += b_b; self.pending_boss_bounty = False
-            if self.pending_elite_bounty: reward += e_b; self.pending_elite_bounty = False
-            if self.pending_smith_bounty: reward += (s_b * s_m); self.pending_smith_bounty = False
+            b_breakdown["floor"] += f_b
+            if self.pending_boss_bounty: b_breakdown["bounty"] += b_b; self.pending_boss_bounty = False
+            if self.pending_elite_bounty: b_breakdown["bounty"] += e_b; self.pending_elite_bounty = False
+            if self.pending_smith_bounty: b_breakdown["bounty"] += (s_b * s_m); self.pending_smith_bounty = False
             self.previous_floor = floor_now
             
         if hp_delta > 0:
-            if hp_ratio > 0.9: reward += hp_delta * -0.5
+            if hp_ratio > 0.9: b_breakdown["hp"] += hp_delta * -0.5
             elif hp_ratio > 0.8: pass
-            elif hp_ratio > 0.5: reward += hp_delta * 0.5
-            elif hp_ratio > 0.3: reward += hp_delta * 1.5
-            else: reward += hp_delta * 4.0
+            elif hp_ratio > 0.5: b_breakdown["hp"] += hp_delta * 0.5
+            elif hp_ratio > 0.3: b_breakdown["hp"] += hp_delta * 1.5
+            else: b_breakdown["hp"] += hp_delta * 4.0
         elif hp_delta < 0:
-            reward += hp_delta * 0.5
+            b_breakdown["hp"] += hp_delta * hp_m
         
         self.previous_hp = hp_after
         enemies_now = new_state.get("battle", {}).get("enemies", [])
-        for e in enemies_now:
-            e_id, e_hp = e.get("entity_id"), e.get("hp", 0)
-            if e_id not in self.lowest_enemy_hp_seen: self.lowest_enemy_hp_seen[e_id] = e_hp
-            elif e_hp < self.lowest_enemy_hp_seen[e_id]: reward += (self.lowest_enemy_hp_seen[e_id] - e_hp) * 0.05; self.lowest_enemy_hp_seen[e_id] = e_hp
+        for i, e in enumerate(enemies_now):
+            e_key = f"{e.get('entity_id')}_{i}"
+            e_hp = e.get("hp", 0)
+            if e_key not in self.lowest_enemy_hp_seen: self.lowest_enemy_hp_seen[e_key] = e_hp
+            elif e_hp < self.lowest_enemy_hp_seen[e_key]: 
+                b_breakdown["dmg"] += (self.lowest_enemy_hp_seen[e_key] - e_hp) * 0.1
+                self.lowest_enemy_hp_seen[e_key] = e_hp
         
+        if not enemies_now: self.lowest_enemy_hp_seen = {}
+
         curr_hp_sum = sum(e.get("hp", 0) for e in enemies_now) + player_now.get("hp", 0)
         deck_size = len(player_now.get("deck", []))
-        prog = (floor_now != self.last_prog_floor or 
-                curr_hp_sum != self.last_prog_hp_sum or 
-                player_now.get("gold", 0) != self.last_prog_gold or
-                player_now.get("block", 0) != self.last_prog_player_block or
-                player_now.get("energy", 0) != self.last_prog_energy or
-                deck_size != self.last_prog_deck_size)
-        
-        if prog: 
+
+        game_prog = (floor_now != self.last_prog_floor or 
+                     curr_hp_sum != self.last_prog_hp_sum or 
+                     player_now.get("gold", 0) != self.last_prog_gold or
+                     player_now.get("block", 0) != self.last_prog_player_block or
+                     player_now.get("energy", 0) != self.last_prog_energy or
+                     deck_size != self.last_prog_deck_size)
+
+        sel_count = len(self.internal_selection_history)
+        sel_prog = (sel_count > 0 and sel_count != getattr(self, 'last_sel_count', -1))
+
+        if game_prog:
             self.stagnant_steps = 0
             self.state_action_counts = {}
+            self.sel_prog_steps = 0
+            self.state_rejection_count = 0
+        elif sel_prog and self.sel_prog_steps < 10:
+            self.stagnant_steps = 0
+            self.sel_prog_steps += 1
+            self.state_rejection_count = 0
         else: 
             self.stagnant_steps += 1
-        
+
+        self.last_sel_count = sel_count
+
         if new_screen != self.last_prog_screen:
             self.internal_selection_history = []
-            
+            self.sel_prog_steps = 0
+
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = new_screen, floor_now, curr_hp_sum, player_now.get("gold", 0)
         self.last_prog_player_block = player_now.get("block", 0)
         self.last_prog_energy = player_now.get("energy", 0)
@@ -822,7 +903,8 @@ class SlayTheSpire2Env(gym.Env):
         if self.total_episode_steps >= 1500:
             self.reboot_reason = "Timeout (1500 Steps)"; self.needs_reboot = True
             return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor}
-        
+
+        reward = sum(b_breakdown.values())
         if new_screen == "game_over":
             reward -= 50.0
             terminated = True
@@ -830,11 +912,12 @@ class SlayTheSpire2Env(gym.Env):
         elif floor_now == 51:
             terminated = True
         self.current_state = new_state
-        
+
         final_reward = reward * (2.0 if floor_now >= 45 else 1.0)
         if not terminated and new_screen != "game_over":
-            self._log_action(f"-> ACCEPTED. Net Reward: {final_reward:+.2f}")
-            
+            sources = ", ".join([f"{k.capitalize()}: {v:+.1f}" for k, v in b_breakdown.items() if v != 0])
+            self._log_action(f"-> ACCEPTED. Net: {final_reward:+.2f} ({sources})")
+
         return obs, final_reward, terminated, False, {"floor": floor_now}
 
     def reset(self, seed=None, options=None):
@@ -844,6 +927,10 @@ class SlayTheSpire2Env(gym.Env):
         state = self.current_state
         self.previous_floor, self.previous_hp = state.get("run", {}).get("floor", 0), state.get("player", {}).get("hp", 0)
         self.combat_step_count, self.total_episode_steps, self.stagnant_steps = 0, 0, 0
+        self.combat_turn_count = 0
+        self.sel_prog_steps = 0
+        self.last_sel_count = -1
+        self.action_cooldowns = {}
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = "none", -1, -1, -1
         self.last_prog_energy, self.last_prog_player_block, self.last_prog_deck_size = -1, -1, -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
