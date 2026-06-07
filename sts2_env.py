@@ -642,7 +642,7 @@ class SlayTheSpire2Env(gym.Env):
         time.sleep(0.01) # 10ms Stability Throttle
         new_state = self._raw_state()
         
-        # Dynamic Screen Transition Polling (Optimized for Fast Mode)
+        # Dynamic Screen Transition Polling
         if payload.get("action") in ["choose_map_node", "proceed"]:
             old_screen = self.current_state.get("state_type")
             for _ in range(40): # Max 2.0 seconds
@@ -656,8 +656,7 @@ class SlayTheSpire2Env(gym.Env):
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
         if payload.get("action") in ["play_card", "use_potion"]: self.action_cooldowns[action_idx] = 5
-        elif payload.get("action") in ["choose_map_node", "proceed"]: self.action_cooldowns[action_idx] = 30
-        elif payload.get("action") in ["claim_reward", "select_card_reward"]: self.action_cooldowns[action_idx] = 10
+        elif payload.get("action") in ["shop_purchase", "choose_rest_option"]: self.action_cooldowns[action_idx] = 10
         self.state_action_counts[action_idx] = self.state_action_counts.get(action_idx, 0) + 1
         if payload.get("action") == "select_card": self.internal_selection_history.append(payload.get("index"))
         elif payload.get("action") in ["confirm_selection", "proceed", "cancel_selection"]: self.internal_selection_history = []
@@ -725,19 +724,22 @@ class SlayTheSpire2Env(gym.Env):
 
         # Stagnation Progress
         curr_hp_sum = sum(e.get("hp", 0) for e in enemies_now) + player_now.get("hp", 0)
-        game_prog = (floor_now != self.last_prog_floor or 
-                     new_screen != self.last_prog_screen or
+        hard_prog = (floor_now != self.last_prog_floor or 
                      curr_hp_sum != self.last_prog_hp_sum or 
                      player_now.get("gold", 0) != self.last_prog_gold or
                      player_now.get("block", 0) != self.last_prog_player_block or
                      player_now.get("energy", 0) != self.last_prog_energy or
                      len(player_now.get("deck", [])) != self.last_prog_deck_size)
+        screen_prog = (new_screen != self.last_prog_screen)
 
         sel_count = len(self.internal_selection_history)
         sel_prog = (sel_count > 0 and sel_count != getattr(self, 'last_sel_count', -1))
 
-        if game_prog:
+        if hard_prog:
             self.stagnant_steps, self.state_action_counts, self.state_rejection_count = 0, {}, 0
+            self.sel_prog_steps = 0
+        elif screen_prog:
+            self.stagnant_steps, self.state_rejection_count = 0, 0
             self.sel_prog_steps = 0
         elif sel_prog and getattr(self, 'sel_prog_steps', 0) < 10:
             self.stagnant_steps, self.state_rejection_count = 0, 0
