@@ -47,7 +47,7 @@ def generate_report():
     train_files = [f for f in mon_files if any(p in f for p in train_ports)]
     
     train_dfs = [read_csv_safe(f) for f in train_files]
-    delta = 0
+    v_delta = 0
     if train_dfs and not all(df.empty for df in train_dfs):
         df_train = pd.concat(train_dfs, ignore_index=True).sort_values(by='t').dropna()
         total_steps = df_train['l'].sum()
@@ -58,16 +58,23 @@ def generate_report():
         print(f"- Stats: Total Steps: {total_steps:,} | Total Runs: {total_runs:,}")
         print(f"- Performance: Mean Reward: {mean_rew:.2f} | Best Floor: {best_floor}")
         
-        if total_runs >= 4:
-            q_size = max(1, int(total_runs/4))
-            q1 = df_train.iloc[:q_size]['r'].mean()
-            q4 = df_train.iloc[-q_size:]['r'].mean()
-            delta = q4 - q1
-            print(f"- Trend (Q1 vs Q4): {q1:.2f} -> {q4:.2f} ({'[UP]' if delta > 0 else '[DOWN]'} {delta:+.2f} Delta)")
+        # Windowed Velocity (Last 100 Runs vs Previous 100 Runs)
+        window = 100
+        if total_runs >= window * 2:
+            latest_win = df_train.iloc[-window:]['r'].mean()
+            prev_win = df_train.iloc[-(window*2):-window]['r'].mean()
+            v_delta = latest_win - prev_win
+            print(f"- Rolling Velocity (Last {window*2} runs): {prev_win:.2f} -> {latest_win:.2f} ({'[UP]' if v_delta > 0 else '[STALL]'} {v_delta:+.2f} Delta)")
+        elif total_runs >= 4:
+            mid = total_runs // 2
+            q1 = df_train.iloc[:mid]['r'].mean()
+            q4 = df_train.iloc[mid:]['r'].mean()
+            v_delta = q4 - q1
+            print(f"- Early Learning Delta: {q1:.2f} -> {q4:.2f} ({'[UP]' if v_delta > 0 else '[DOWN]'} {v_delta:+.2f} Delta)")
     else:
         print("- Stats: No training data found in monitor logs.")
 
-    # 1. Aggressive Progress Search (Master + Sessions)
+    # Aggressive Progress Search (Master + Sessions)
     all_progs = []
     if os.path.exists(PROGRESS_CSV) and os.path.getsize(PROGRESS_CSV) > 0:
         try: all_progs.append(pd.read_csv(PROGRESS_CSV))
@@ -89,17 +96,17 @@ def generate_report():
         latest = df_prog.iloc[-1]
         print(f"- SB3 Rollout: fps: {latest.get('time/fps', 0):.1f} | iterations: {latest.get('time/iterations', 0)} | elapsed: {latest.get('time/time_elapsed', 0)/60:.1f}m")
         print(f"- Technical Health & Confidence:")
+        
         entropy = latest.get('train/entropy_loss', 0)
         kl = latest.get('train/approx_kl', 0)
         v_loss = latest.get('train/value_loss', 0)
         exp_var = latest.get('train/explained_variance', 0)
         
-        # Simple heuristic for Policy Confidence
-        confidence = "HIGH (Exploiting)" if entropy > -0.5 else "LOW (Exploring)" if kl > 0.03 else "STABLE"
+        var_status = "STABLE" if exp_var > 0.5 else "CONFUSED" if exp_var < 0 else "LEARNING"
         
-        print(f"  > Stability: entropy_loss: {entropy:.4f} | lr: {latest.get('train/learning_rate', 0):.2e} | loss: {latest.get('train/loss', 0):.4f}")
-        print(f"  > Policy/Value: approx_kl: {kl:.4f} | value_loss: {v_loss:.4f} | explained_variance: {exp_var:.4f}")
-        print(f"  > Confidence: {confidence}")
+        print(f"  > Explained Variance: {exp_var:.4f} [{var_status}]")
+        print(f"  > Entropy Loss: {entropy:.4f} (Exploration: {'HIGH' if entropy < -1.0 else 'LOW'})")
+        print(f"  > Policy/Value: approx_kl: {kl:.4f} | value_loss: {v_loss:.4f} | lr: {latest.get('train/learning_rate', 0):.2e}")
     else:
         print("- Technical Health: progress.csv is empty.")
 
@@ -125,7 +132,7 @@ def generate_report():
     if train_dfs and not all(df.empty for df in train_dfs):
         recent_20 = df_train.tail(20)
         stalling = recent_20['l'].mean() > 1000 and recent_20['floor'].mean() < 5
-        print(f"- [STATUS]: {'[UP] Staircase Reward Trend' if delta > 0 else '[OK] Stable Baseline'}")
+        print(f"- [STATUS]: {'[UP] Staircase Reward Trend' if v_delta > 0 else '[OK] Stable Baseline'}")
         if stalling: print("- [WARNING]: Potential Stalling detected.")
     
     print("- Orchestrator: Master Log Consolidation active. Data Isolation confirmed.")
