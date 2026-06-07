@@ -17,9 +17,15 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 * **Synergy-CNN Vision:** The agent processes its hand using a 1D-Convolutional branch, allowing it to "scan" for card combos rather than just reading raw scalar numbers.
 * **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's logic. The environment performs a **Fresh API Fetch** at the start of every Step cycle and utilizes a high-performance cache for masking, preventing desyncs without sacrificing training throughput (FPS).
 * **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **One-Way Gate** selection system.
-    * **Toggle Prevention:** Once a card is selected in a multi-select menu, it is strictly masked in the environment. This makes it impossible for the agent to "unselect" a choice, eliminating flickering loops and stalling.
-    * **Abyssal Baths Safety Threshold:** Includes a surgical safety mask for the repeatable 'Linger' option in Act 1. If the agent's HP falls below **30%**, the option is automatically disabled, forcing an exit.
+    * **Zero-Reboot Grade Stability:**
+    * **Smart Progress Tracking:** The environment implements a multi-dimensional stagnation tracker. Counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 40-step reboot failsafe only triggers for true engine freezes, fulfilling the mandate to minimize technical interruptions.
+    * **Absolute path-based Force-Kill:** The reboot logic now performs an exhaustive path-based cleanup of the node's specific folder before relaunching. This physically prevents the spawning of duplicate game instances and ensures file locks on `godot.log` are released.
+    * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, physically forcing the agent to resolve choices before fighting to prevent deadlocks.
+    * **Safe Throttle:** Implements a global **10ms input delay** (0.01s) to provide a safety buffer for the Godot engine's C# animation handlers, physically preventing "UI Stacking" and frozen buttons.
+    * **Boss-Only Map Proceed:** The map `proceed` button is strictly disabled unless the agent is on a Boss Floor (16, 33, 51), preventing the "Fake Proceed" trap in standard rooms.
+    * **Real-Map Verification:** The environment only identifies the screen as "map" if actual navigation nodes are present in the API response.
 * **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs, infinite loops, or **API/State Invalid** errors. It automatically reboots the specific game node and triggers a **Neutral Abort (0.0 reward)** to protect the model's policy.
+* **Deadlock Recovery:** Lowers the technical reboot timer to **40 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
 * **Environment Stability:** Features module-level global constant management and robust dictionary-safe state parsing to ensure reliable distributed training across multiple nodes.
 * **Closed-Loop Telemetry:** Implements a "verify-then-delete" log consolidation system. Upon reboot, the orchestrator automatically merges fragmented CSVs into master files, truncates "ghost steps" to match the brain checkpoint, and purges technical telemetry created after the checkpoint timestamp.
 
@@ -69,8 +75,8 @@ Slay the Spire 2 is powered by the Godot engine, which generates detailed debug 
 **Automated Mitigation Strategy:**
 The environment now includes a multi-layered **Self-Healing** system to handle this automatically:
 1.  **Fast Timeout:** API timeouts are set to **5.0s**. If a node freezes, it is detected and rebooted within seconds.
-2.  **Real-Time Size Monitor:** The environment checks the size of `godot.log` every 25 actions. If it exceeds **200 MB**, an immediate "Storage Bloat Failsafe" reboot is triggered.
-3.  **Aggressive Vacuuming:** Upon reboot, the system force-kills the game node and purges `godot.log` if it is over the 200 MB safety threshold. **Note:** All game nodes must be terminated to release the shared file lock on `godot.log` for successful deletion.
+2.  **Real-Time Size Monitor:** The environment checks the size of `godot.log` every 25 actions. If it exceeds **1 GB**, an immediate "Storage Bloat Failsafe" reboot is triggered.
+3.  **Aggressive Vacuuming:** Upon reboot, the system force-kills the game node and purges `godot.log` if it is over the 1 GB safety threshold. **Note:** All game nodes must be terminated to release the shared file lock on `godot.log` for successful deletion.
 4.  **Absolute Mask Hardening:** To prevent technical deadlocks, the environment employs a **Finality-First** masking architecture. 
     *   **Deterministic Map Navigation:** The `proceed` button is strictly disabled if Map Nodes are available, forcing a destination choice.
     *   **Repetition Finality:** The 10-click repetition blocker is the **final step** in the masking process, ensuring it can never be overridden by safety fallbacks.
@@ -125,7 +131,12 @@ A highly specialized, multi-layered reward system was designed to balance short-
     * **50+ steps:** `-20.0` penalty per action.
 * **Indecision Tax (Masked Actions):** To prevent the agent from "stalling" by spamming invalid inputs, every masked action attempt results in a light **`-1.0` penalty**.
 * **Reward Telemetry:** Every action reward is logged in real-time within the `node_trace_{port}.jsonl` files, now featuring a **Granular Breakdown** (e.g., `-> ACCEPTED. Net: +10.59 (Floor: +10.0, Dmg: +0.6, Tax: -0.01)`).
-* **Dynamic Survival Instinct (Campfires):** Healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**.
+* **Dynamic Survival Instinct (Campfires):** Healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**:
+    * **Ratio > 90%:** Healing is penalized (**-0.5x**), Smithing is boosted (**1.5x**).
+    * **Ratio 80-90%:** Healing is neutral (**0.0x**), Smithing is encouraged (**1.2x**).
+    * **Ratio 50-80%:** Standard operation (**0.5x** Heal, **1.0x** Smith).
+    * **Ratio 30-50%:** Healing is prioritized (**1.0x**), Smithing is discouraged (**0.2x**).
+    * **Ratio < 30%:** Healing is vital (**2.0x**), Smithing is heavily penalized (**-2.0x**).
 * **HP Delta (Dynamic Strictness):** Dynamic rewards (**`+0.1`** per enemy HP damage dealt). Damage rewards are calculated using a **Unique Enemy Key** (ID + Position) to ensure 100% mathematical accuracy.
     * *Note: Class-specific passive bonuses (like Ironclad's Burning Blood) are naturally integrated into the HP Delta system, providing additional positive reinforcement for successful combat victories.*
 * **The Universal Bounty Matrix:** To prevent exponential point inflation across phases, bounties are flattened into a universal constant:

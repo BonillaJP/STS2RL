@@ -352,10 +352,8 @@ class PhaseManagerCallback(BaseCallback):
 
     def _apply_phase(self):
         """Updates the environments and model for the current phase."""
-        for env in self.training_env.envs:
-            env.unwrapped.set_training_phase(self.phase_idx)
-        for env in self.eval_env.envs:
-            env.unwrapped.set_training_phase(self.phase_idx)
+        self.training_env.env_method("set_training_phase", self.phase_idx)
+        self.eval_env.env_method("set_training_phase", self.phase_idx)
         
         lr = {1: 1e-4, 2: 1e-4, 3: 1e-4, 4: 5e-5, 5: 5e-5}.get(self.phase_idx, 5e-5)
         self.model.learning_rate = lr
@@ -727,12 +725,11 @@ def main():
                 except: pass
             
             model.learn(
-                total_timesteps=(stage_end - model.num_timesteps), 
-                callback=CallbackList([metrics_cb, phase_cb, CustomProgressBarCallback(stage_end, phase_cb, tracker)]), 
-                reset_num_timesteps=False, 
-                progress_bar=False
+                total_timesteps=(stage_end - model.num_timesteps),
+                callback=CallbackList([metrics_cb, phase_cb, CustomProgressBarCallback(stage_end, phase_cb, tracker)]),
+                reset_num_timesteps=False,
+                progress_bar=True
             )
-
             if model.num_timesteps >= phase_cb.last_eval_step + phase_cb.eval_freq_global:
                 phase_cb._run_exam()
     except (KeyboardInterrupt, Exception) as e:
