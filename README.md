@@ -26,7 +26,7 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
         * **Smart Progress Tracking:** The environment implements a multi-dimensional stagnation tracker. Counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 100-step reboot failsafe only triggers for true engine freezes.
     * **Absolute path-based Force-Kill:** The reboot logic now performs an exhaustive path-based cleanup of the node's specific folder before relaunching. This physically prevents the spawning of duplicate game instances and ensures file locks on `godot.log` are released.
     * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, physically forcing the agent to resolve choices before fighting to prevent deadlocks.
-    * **Safe Throttle:** Implements a global **10ms input delay** (0.01s) to provide a safety buffer for the Godot engine's C# animation handlers.
+    * **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers.
     * **Boss-Only Map Proceed:** The map `proceed` button is strictly disabled unless the agent is on a Boss Floor (16, 33, 51), preventing the "Fake Proceed" trap.
     * **Real-Map Verification:** The environment only identifies the screen as "map" if actual navigation nodes are present in the API response.
 * **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs, infinite loops, or **API/State Invalid** errors. It automatically reboots the specific game node and triggers a **Neutral Abort (0.0 reward)** to protect the model's policy.

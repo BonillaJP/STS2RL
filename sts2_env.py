@@ -139,7 +139,11 @@ class SlayTheSpire2Env(gym.Env):
     def set_global_step(self, step):
         self.global_step = step
 
-    def _get_session(self):
+    def _get_session(self, reset=False):
+        if reset and self.session:
+            try: self.session.close()
+            except: pass
+            self.session = None
         if self.session is None: self.session = requests.Session()
         return self.session
 
@@ -206,6 +210,7 @@ class SlayTheSpire2Env(gym.Env):
         self._log_reboot(log_reason)
         self.reboot_reason = "Stall/Deadlock Recovery"
         self._vacuum_disk(full_nuke=False)
+        self._get_session(reset=True)
 
         print(f"[REBOOT] Waiting for Port {self.port} to be released...")
         for _ in range(30):
@@ -415,10 +420,14 @@ class SlayTheSpire2Env(gym.Env):
         except: return False
 
     def _raw_state(self):
-        for _ in range(10):
+        for _ in range(5):
             try:
-                state = self._get_session().get(f"{self.game_url}?format=json", timeout=2.0).json()
-                if state: return state
+                resp = self._get_session().get(f"{self.game_url}?format=json", timeout=0.5)
+                if resp.status_code == 200:
+                    state = resp.json()
+                    if state: return state
+            except requests.exceptions.ConnectionError:
+                return {} 
             except: pass
             time.sleep(0.01)
         return {}
@@ -650,7 +659,7 @@ class SlayTheSpire2Env(gym.Env):
             if "target_idx" in payload: del payload["target_idx"]
         
         valid = self._post(payload)
-        time.sleep(0.01) # 10ms Stability Throttle
+        time.sleep(0.05) # 50ms Stability Throttle
         new_state = self._raw_state()
         
         # Dynamic Screen Transition Polling
