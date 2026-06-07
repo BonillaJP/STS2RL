@@ -108,7 +108,7 @@ def generate_report():
         print(f"  > Entropy Loss: {entropy:.4f} (Exploration: {'HIGH' if entropy < -1.0 else 'LOW'})")
         print(f"  > Policy/Value: approx_kl: {kl:.4f} | value_loss: {v_loss:.4f} | lr: {latest.get('train/learning_rate', 0):.2e}")
     else:
-        print("- Technical Health: progress.csv is empty.")
+        print("- Technical Health: progress.csv is empty (Waiting for first 3,072 steps to complete).")
 
     print("\n### PART 2: EVALUATION TELEMETRY (Mastery Exams)")
     

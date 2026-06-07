@@ -188,7 +188,7 @@ class SlayTheSpire2Env(gym.Env):
         folder_fragment = os.path.basename(os.path.dirname(self.game_path))
         print(f"\n[REBOOT] Path-based cleanup on '{folder_fragment}'...")
         
-        # Absolute path-based force-kill (Prevents duplicate instances)
+        # Absolute path-based force-kill
         ps_kill = f"Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -like '*{folder_fragment}*' }} | Stop-Process -Force"
         subprocess.run(["powershell", "-NoProfile", "-Command", ps_kill], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
@@ -223,8 +223,15 @@ class SlayTheSpire2Env(gym.Env):
             cmd = f'cmd /c start "" "{game_exe}"'
             subprocess.Popen(cmd, cwd=game_dir, shell=True)
         except Exception as e: print(f"[REBOOT] relaunch failed: {e}")
-        print(f"[REBOOT] Warming up API (30s)...")
-        time.sleep(30.0)
+        
+        print(f"[REBOOT] Polling API Port {self.port} for warmup...")
+        for i in range(60):
+            try:
+                resp = requests.get(f"http://127.0.0.1:{self.port}/api/v1/profiles", timeout=1.0)
+                if resp.status_code == 200: 
+                    print(f"[REBOOT] API Online after {i}s."); break
+            except: pass
+            time.sleep(1.0)
 
     def action_masks(self):
         state = self.current_state
@@ -236,7 +243,7 @@ class SlayTheSpire2Env(gym.Env):
         battle = state.get("battle", {})
         enemies = battle.get("enemies", [])
         
-        # Priority Classification: Handle overlays before combat
+        # Priority Classification
         if "hand_select" in state: screen = "hand_select"
         elif any(k in state for k in OVERLAY_KEYS): screen = "card_select_overlay"
         elif len(enemies) > 0 or battle.get("is_play_phase"): screen = "combat"
@@ -371,7 +378,7 @@ class SlayTheSpire2Env(gym.Env):
             set_mask(200, 5, [r.get("index") for r in state.get("treasure", {}).get("relics", [])])
             if state.get("treasure", {}).get("can_proceed"): mask[123] = True
 
-        # Global Options (Menu/Back)
+        # Global Options
         opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
         for i, m in enumerate(MENU_OPTS):
             if m.lower() in opts and m.lower() != "settings": mask[205 + i] = True
@@ -391,7 +398,7 @@ class SlayTheSpire2Env(gym.Env):
                 else: mask[123] = True
             else: mask[123] = True
             
-        # Action Cooldowns (Enforced last to prevent overwriting)
+        # Action Cooldowns
         for act_idx, cooldown in self.action_cooldowns.items():
             if cooldown > 0: mask[act_idx] = False
             
@@ -408,8 +415,13 @@ class SlayTheSpire2Env(gym.Env):
         except: return False
 
     def _raw_state(self):
-        try: return self._get_session().get(f"{self.game_url}?format=json", timeout=5.0).json()
-        except: return {}
+        for _ in range(10):
+            try:
+                state = self._get_session().get(f"{self.game_url}?format=json", timeout=2.0).json()
+                if state: return state
+            except: pass
+            time.sleep(0.01)
+        return {}
 
     def _ensure_fresh_run(self):
         consecutive_failures = 0
@@ -438,7 +450,7 @@ class SlayTheSpire2Env(gym.Env):
                     target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
                     if resp.get("current_profile_id") != target_profile:
                         self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
-                        time.sleep(2.0); self._post({"action": "proceed"}); continue
+                        self._post({"action": "proceed"}); continue
                 except: pass
                 if "continue" in opts: self._post({"action": "menu_select", "option": "continue"})
                 elif "singleplayer" in opts: self._post({"action": "menu_select", "option": "singleplayer"})
@@ -453,7 +465,7 @@ class SlayTheSpire2Env(gym.Env):
                 profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
                 try: self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
                 except: pass
-                time.sleep(1.0); self._post({"action": "proceed"})
+                self._post({"action": "proceed"})
             elif menu == "popup":
                 if "confirm" in opts: self._post({"action": "menu_select", "option": "confirm"})
                 elif "yes" in opts: self._post({"action": "menu_select", "option": "yes"})
@@ -461,7 +473,7 @@ class SlayTheSpire2Env(gym.Env):
                 else: self._post({"action": "proceed"})
             elif screen == "neow": self._post({"action": "choose_event_option", "index": 0})
             else: self._post({"action": "proceed"})
-            time.sleep(0.5)
+            time.sleep(0.01)
         self._reboot_game_client(reason="API Startup Timeout"); return self._ensure_fresh_run()
 
     def _flatten_state(self, state):
@@ -575,7 +587,6 @@ class SlayTheSpire2Env(gym.Env):
             appdata = os.getenv('APPDATA')
             if appdata:
                 log_path = os.path.join(appdata, "SlayTheSpire2", "logs", "godot.log")
-                # 1GB Marathon Cap
                 if os.path.exists(log_path) and os.path.getsize(log_path) > 1024 * 1024 * 1024:
                     self.needs_reboot = True; return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
         fresh_state = self._raw_state()
@@ -585,9 +596,9 @@ class SlayTheSpire2Env(gym.Env):
             if "corrupt" in msg or "not able to load" in msg:
                 self.reboot_reason = f"Engine Bug: {msg}"; self.needs_reboot = True
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
-        # 40-Step Reboot (Aggressive Marathon Recovery)
-        if self.stagnant_steps >= 40:
-            self.reboot_reason = "Deadlock (40 Steps)"; self.needs_reboot = True
+        # 100-Step Reboot
+        if self.stagnant_steps >= 100:
+            self.reboot_reason = "Deadlock (100 Steps)"; self.needs_reboot = True
             return self._flatten_state(self.current_state), -2000.0, True, False, {"floor": self.previous_floor, "deadlock": True}
         
         payload = FLAT_ACTIONS[int(action_idx)].copy()
@@ -607,7 +618,7 @@ class SlayTheSpire2Env(gym.Env):
         
         is_autokick, rejected = False, not self.action_masks()[action_idx]
         if rejected: self.state_rejection_count += 1
-        if self.state_rejection_count >= 20 or self.stagnant_steps >= 40:
+        if self.state_rejection_count >= 20 or self.stagnant_steps >= 100:
             is_autokick = True
             m = self.action_masks()
             valid_actions = [i for i, val in enumerate(m) if val]
@@ -645,7 +656,7 @@ class SlayTheSpire2Env(gym.Env):
         # Dynamic Screen Transition Polling
         if payload.get("action") in ["choose_map_node", "proceed"]:
             old_screen = self.current_state.get("state_type")
-            for _ in range(40): # Max 2.0 seconds
+            for _ in range(40): 
                 if not new_state or new_state.get("state_type") != old_screen: break
                 time.sleep(0.05); new_state = self._raw_state()
 
@@ -696,13 +707,11 @@ class SlayTheSpire2Env(gym.Env):
             if self.pending_boss_bounty: b_breakdown["bounty"] += 100.0; self.pending_boss_bounty = False
             if self.pending_elite_bounty: b_breakdown["bounty"] += 30.0; self.pending_elite_bounty = False
             if self.pending_smith_bounty:
-                # Smithing Multipliers
                 s_m = 1.5 if hp_ratio > 0.9 else 1.2 if hp_ratio > 0.8 else 1.0 if hp_ratio > 0.5 else 0.2 if hp_ratio > 0.3 else -2.0
                 b_breakdown["bounty"] += (15.0 * s_m); self.pending_smith_bounty = False
             self.previous_floor = floor_now
             
         if hp_delta > 0:
-            # Healing Multipliers
             if hp_ratio > 0.9: b_breakdown["hp"] += hp_delta * -0.5
             elif hp_ratio > 0.8: pass
             elif hp_ratio > 0.5: b_breakdown["hp"] += hp_delta * 0.5
@@ -784,3 +793,4 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_energy, self.last_prog_player_block, self.last_prog_deck_size = -1, -1, -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
         self.lowest_enemy_hp_seen = {}; return self._flatten_state(state), {}
+
