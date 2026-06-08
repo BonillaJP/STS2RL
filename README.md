@@ -36,7 +36,7 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
     * **Boss-Only Map Proceed:** The map `proceed` button is strictly disabled unless the agent is on a Boss Floor (16, 33, 51), preventing the "Fake Proceed" trap.
     * **Real-Map Verification:** The environment only identifies the screen as "map" if actual navigation nodes are present in the API response.
 * **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs, infinite loops, or **API/State Invalid** errors. It automatically reboots the specific game node and triggers a **Neutral Abort (0.0 reward)** to protect the model's policy.
-* **Deadlock Recovery:** Lowers the technical reboot timer to **100 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
+* **Deadlock Recovery:** Lowers the technical reboot timer to **200 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
 * **Closed-Loop Telemetry:** Implements a "verify-then-delete" log consolidation system. Upon reboot, the orchestrator automatically merges fragmented CSVs into master files, truncates "ghost steps" to match the brain checkpoint, and purges technical telemetry created after the checkpoint timestamp.
 
 ## 🖥️ Cluster Setup & Game Cloning
@@ -116,7 +116,7 @@ The environment features a five-layer **Self-Healing** system to handle engine c
 * **Poisoned Save Recovery:** Every reboot surgically deletes the `current_run.save` and `current_run.save.backup` for the specific profile. This clears bugged game states and ensures the node always starts at a fresh Main Menu.
 * **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers, preventing "Thread Collisions" and hard crashes during heavy enemy turns.
 * **Storage Bloat Failsafe:** The environment proactively monitors the Godot engine's log size. If `godot.log` exceeds **1 GB**, the system automatically triggers a Level 5 Purge reset.
-* **Deadlock Recovery:** Lowers the technical reboot timer to **100 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
+* **Deadlock Recovery:** Lowers the technical reboot timer to **200 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
 
 ## ⚙️ Technical Deep Dive
 
@@ -166,6 +166,7 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 * **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update.
 * **Hall of Fame:** If a high score is achieved during a rollout, the **updated brain** (containing the new learning) is saved to `hall_of_fame/` at the start of the next update iteration.
 * **Ultimate Best:** Reserved for **Phase Promotions**. When an agent successfully completes a Phase, its graduating brain is secured in the `ultimate_best/` directory for historical reference.
+* **Smart Entropy Defibrillator:** To prevent behavioral "ruts" in Act 1, the orchestrator implements a dynamic curiosity spike. If the agent fails to reach the Act 1 Boss for **5 consecutive exams**, the `ent_coef` is automatically increased (+0.02) to force exploration of new card synergies. Upon success, entropy slowly decays to stabilize the policy, and resets to baseline upon Act promotion. This physically prevents the agent from overfitting to a mediocre Act 1 strategy.
 
 ### 📊 Persistent Data & Session Logging
 To guarantee 100% data integrity across cluster reboots, the project implements a **Fragment-and-Merge** logging architecture:
@@ -280,10 +281,6 @@ To modify the core behavior of the agent or optimize for different hardware, ref
 *   **`time.sleep(0.05)`**: The **Stability Throttle**. 
     *   *Tip:* If the Godot engine crashes during heavy enemy animations, increase this to **0.1s**. If your PC is high-end, you can try lowering it to **0.01s** for extreme SPS.
 * **Deadlock Threshold:** If the agent is training on high Ascension levels where combat lasts longer, the `stagnant_steps` threshold (default 100) may be increased to prevent premature reboots.
-*   **`rejection_penalty`**: Currently set to **-1.0**. 
-    *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.
-
-:** If the agent is training on high Ascension levels where combat lasts longer, the `stagnant_steps` threshold (default 100) may be increased to prevent premature reboots.
 *   **`rejection_penalty`**: Currently set to **-1.0**. 
     *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.
 
