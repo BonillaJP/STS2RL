@@ -102,15 +102,21 @@ Slay the Spire 2 is powered by the Godot engine, which generates detailed debug 
 
 ⚠️ **KNOWN ENGINE BUG LOOP:** A massive storage consumption spike can happen if the evaluation or training nodes encounter a deterministic preloading/rendering exception. Specifically, when the model triggers the `PunchOff` event (most commonly observed on **Floor 14**), a native C# NullReferenceException inside the game's asynchronous animation thread causes an infinite error dump. Because this failure loops endlessly on every single frame tick (`_Process`), the log file can rapidly balloon by tens of gigabytes within minutes.
 
-**Automated Mitigation Strategy:**
-The environment features a multi-layered **Self-Healing** system for autonomous error recovery:
-1.  **Fast Timeout:** API timeouts are set to **5.0s**. If a node freezes, it is detected and rebooted within seconds.
-2.  **Real-Time Size Monitor:** The environment checks the size of `godot.log` every 25 actions. If it exceeds **1 GB**, an immediate "Storage Bloat Failsafe" reboot is triggered.
-3.  **Aggressive Vacuuming:** Upon reboot, the system force-kills the game node and purges `godot.log` if it is over the 1 GB safety threshold. **Note:** All game nodes must be terminated to release the shared file lock on `godot.log` for successful deletion.
-4.  **Absolute Mask Hardening:** To prevent technical deadlocks, the environment employs a **Finality-First** masking architecture. 
-    *   **Deterministic Map Navigation:** The `proceed` button is strictly disabled if Map Nodes are available, forcing a destination choice.
-    *   **Repetition Finality:** The 10-click repetition blocker is the **final step** in the masking process, ensuring it can never be overridden by safety fallbacks.
-5. **Global Stagnation Shield:** To prevent technical deadlocks and minimize cluster-wide reboots, the environment employs a **Surgical Recovery** system. If an agent fails to produce physical progress after **20 rejected attempts** or **100 stagnant steps**, the environment programmatically executes an intelligent "Smart Kick". For example, if stuck on the map screen, it intelligently identifies and selects an available map node. Crucially, the 10-use action limit is only reset on **Hard Progress**, ensuring that if a Smart Kick triggers a screen change without real progress, the looping action remains masked. This safely breaks the loop and resets the stagnation timers before the 100-step technical reboot failsafe can trigger.
+**High-Stability Hierarchy (Zero-Intervention Recovery):**
+The environment features a five-layer **Self-Healing** system to handle engine crashes, lag spikes, and mod bugs autonomously:
+
+1.  **Patient API Handshake (Level 1):** Godot engine loading screens can cause the API to return empty states for several seconds. The environment performs **20 micro-retries** (10ms intervals) before declaring a failure, providing a **10-second safety window** for room transitions.
+2.  **60s Startup Safety (Level 2):** The orchestrator provides a generous **60-second window** for the game to reach the Main Menu during reboots, physically preventing the "Murder Loop" where the script kills the game while it is still booting.
+3.  **Surgical Reboot Protocol (Level 3):** For standard failures (deadlocks or API stutters), the system identifies and kills **ONLY the specific frozen node** by its absolute process name (e.g., 'Node 1'). All other nodes continue training uninterrupted.
+4.  **Ghost Save Recovery (Level 4):** Automatically detects and clears cached "Continue" states by toggling profiles (e.g., 1 -> 2 -> 1) upon reboot. This forces the Godot engine to refresh its metadata and realize the run is gone.
+5.  **Full Cluster Purge (Level 5):** Triggered ONLY if `godot.log` exceeds 1GB. The system performs an exhaustive force-kill of Node 1, Node 2, Node 3, Node 4, and SlayTheSpire2 simultaneously to release shared file locks and autonomously delete the bloated log.
+6.  **Void Reward Failsafe:** To maintain training integrity, any run interrupted by a technical reboot (Deadlock, Bloat, or Engine Bug) is automatically **Voided**. The environment returns a **0.0 reward** (Neutral Abort), ensuring that technical failures do not influence the neural policy.
+
+**Additional Precision Layers:**
+* **Poisoned Save Recovery:** Every reboot surgically deletes the `current_run.save` and `current_run.save.backup` for the specific profile. This clears bugged game states and ensures the node always starts at a fresh Main Menu.
+* **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers, preventing "Thread Collisions" and hard crashes during heavy enemy turns.
+* **Storage Bloat Failsafe:** The environment proactively monitors the Godot engine's log size. If `godot.log` exceeds **1 GB**, the system automatically triggers a Level 5 Purge reset.
+* **Deadlock Recovery:** Lowers the technical reboot timer to **100 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
 
 ## ⚙️ Technical Deep Dive
 
@@ -176,7 +182,8 @@ A highly specialized, multi-layered reward system was designed to balance short-
 * **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps.
     * **15+ steps:** `-2.0` penalty per action.
     * **30+ steps:** `-5.0` penalty per action.
-    * **50+ steps:** `-20.0` penalty per action.
+    * **100+ steps:** `-20.0` penalty per action.
+    * **200+ steps:** **Autonomous Surgical Reboot.**
 * **Indecision Tax (Masked Actions):** To prevent the agent from "stalling" by spamming invalid inputs, every masked action attempt results in a light **`-1.0` penalty**.
 * **Reward Telemetry:** Every action reward is logged in real-time within the `node_trace_{port}.jsonl` files, featuring a **Granular Breakdown** (e.g., `-> ACCEPTED. Net: +10.59 (Floor: +10.0, Dmg: +0.6, Tax: -0.01)`).
 * **Dynamic Survival Instinct (Campfires):** Healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**:
@@ -266,13 +273,17 @@ To modify the core behavior of the agent or optimize for different hardware, ref
 *   **`BUFFER_STAGES`**: A curriculum list where each entry is `(Batch Size, Steps per Update, Max Step)`. 
     *   *Tip:* If your GPU memory is low, decrease the **Batch Size** (e.g., 3072 -> 1024).
 *   **`ent_coef`**: Controls the entropy coefficient (exploration). 
-    *   *Tip:* Set this to **0.05** for early training (Phase 1-2) to force the agent to try new cards. Decay it to **0.01** in later phases for fine-tuning.
+    *   *Tip:* Set this to **0.05** for early training (Phase 1-2). The **Smart Entropy Defibrillator** will automatically boost this if the agent becomes stuck in a tactical rut in Act 1.
 *   **`learning_rate`**: Fixed at **1e-4** for early acts. If the agent's policy collapses (High `approx_kl`), lower this to **5e-5**.
 
 ### 2. Environment Stability (`sts2_env.py`)
 *   **`time.sleep(0.05)`**: The **Stability Throttle**. 
     *   *Tip:* If the Godot engine crashes during heavy enemy animations, increase this to **0.1s**. If your PC is high-end, you can try lowering it to **0.01s** for extreme SPS.
 * **Deadlock Threshold:** If the agent is training on high Ascension levels where combat lasts longer, the `stagnant_steps` threshold (default 100) may be increased to prevent premature reboots.
+*   **`rejection_penalty`**: Currently set to **-1.0**. 
+    *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.
+
+:** If the agent is training on high Ascension levels where combat lasts longer, the `stagnant_steps` threshold (default 100) may be increased to prevent premature reboots.
 *   **`rejection_penalty`**: Currently set to **-1.0**. 
     *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.
 

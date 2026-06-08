@@ -20,6 +20,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.logger import configure
 import sys
 
+# TeeLogger: High-performance log utility that mirrors console output to disk
 class TeeLogger:
     def __init__(self, filename, mode="a", max_mb=50):
         self.filename = filename
@@ -52,6 +53,7 @@ class TeeErrorLogger(TeeLogger):
     def __init__(self, filename, mode="a", max_mb=50):
         super().__init__(filename, mode, max_mb)
         self.terminal = sys.stderr
+
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize, unwrap_vec_normalize
@@ -67,11 +69,12 @@ HOF_DIR = os.path.join(MODEL_DIR, "hall_of_fame")
 
 SESSION_ID = int(time.time())
 
+# Training ports for the 3-node learning cluster
 TRAIN_PORTS = [15526, 15527, 15528]
+# Port for the deterministic evaluation node
 EVAL_PORT = 15529
 
-# --- Curriculum Stages ---
-# Training is split into stages (Batch Size, Steps per Update, Max Steps) to balance speed and stability.
+# Training Curriculum Stages: (Batch Size, Steps per Update, Max Steps)
 BUFFER_STAGES = [
     (1024, 256, 18_432), 
     (3072, 512, 100_000_000)
@@ -79,8 +82,7 @@ BUFFER_STAGES = [
 
 PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 
-# --- Neural Network Architecture ---
-# SynergyCNNExtractor: Uses 1D Convolution to 'scan' card hands for combos and relic patterns.
+# SynergyCNNExtractor: 1D-Convolutional branch to 'scan' card hands for combos
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
         super().__init__(observation_space, features_dim=1152)
@@ -104,7 +106,7 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
         self.final_dense = nn.Sequential(nn.Linear(1280 + 640 + 512, 1152), nn.ReLU())
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
-        # Split the observation vector into its logical components (meta, cards, relics)
+        # Split vector into Meta [0-320], Hand [320-620], Meta [620-770], Relics [770-870], Meta [870+]
         meta_1 = observations[:, :320]
         hand_flat = observations[:, 320:620]
         meta_2 = observations[:, 620:770]
@@ -112,13 +114,13 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
         meta_3 = observations[:, 870:]
         
         metadata = th.cat([meta_1, meta_2, meta_3], dim=1)
-        # Reshape data for the CNN branches (Batch, Channels, Length)
+        # Reshape for CNN input: (Batch, Channels, Length)
         hand_spatial = hand_flat.view(-1, 10, 30).transpose(1, 2)
         relic_spatial = relic_flat.view(-1, 20, 5).transpose(1, 2)
         
         return self.final_dense(th.cat([self.hand_cnn(hand_spatial), self.relic_cnn(relic_spatial), self.meta_processor(metadata)], dim=1))
 
-# Performance Tracker: Saves the all-time best scores and Hall of Fame models
+# Manages Hall of Fame models and all-time best scoring
 class GlobalPerformanceTracker:
     def __init__(self):
         self.best_reward, self.best_floor, self.hof_entries = -1000.0, 0, []
@@ -148,7 +150,6 @@ class GlobalPerformanceTracker:
                     if os.path.exists(old_path): os.remove(old_path)
                     if os.path.exists(old_vec): os.remove(old_vec)
                 except: pass
-        
         self.save()
     def save(self):
         try:
@@ -156,7 +157,7 @@ class GlobalPerformanceTracker:
         except: pass
 
 def synchronize_logs(current_step, checkpoint_path=None):
-    """Merges fragmented logs and truncates ghost steps to ensure 100% data integrity."""
+    """Merges fragmented session logs and truncates 'ghost steps' for 100% telemetry accuracy."""
     print(f"[INTEGRITY] Synchronizing logs with current brain step: {current_step:,}...")
     
     tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
@@ -259,6 +260,7 @@ def synchronize_logs(current_step, checkpoint_path=None):
             if cleaned_count > 0: status += f" and cleaned {cleaned_count} ghost runs"
             print(f"  > Port {port}: {status}. Master log established.")
 
+# Custom metrics collection for Tensorboard
 class TensorboardMetricsCallback(BaseCallback):
     def __init__(self, tracker, verbose=0):
         super().__init__(verbose)
@@ -288,7 +290,7 @@ class TensorboardMetricsCallback(BaseCallback):
             norm_env = unwrap_vec_normalize(self.training_env)
             if norm_env: norm_env.save(hof_vec_path)
             self.tracker.add_hof(reward, hof_path)
-            print(f"[HALL OF FAME] Record Verified! Updated Brain (Score: {reward:.1f}) saved to gallery.")
+            print(f"[HALL OF FAME] New record ({reward:.1f})! Updated brain secured.")
             self.pending_hof_save = False
             self.pending_hof_reward = -1000.0
 
@@ -309,7 +311,7 @@ class TensorboardMetricsCallback(BaseCallback):
                 print(f"[{timestamp}] RUN #{self.episode_count} | Floor: {floor} | Rew: {reward:.1f} (Best: {self.tracker.best_floor})")
         return True
 
-
+# High-detail progress bar with live telemetry
 class CustomProgressBarCallback(BaseCallback):
     def __init__(self, total_timesteps, phase_manager, tracker, verbose=0):
         super().__init__(verbose)
@@ -325,13 +327,15 @@ class CustomProgressBarCallback(BaseCallback):
     def _on_training_end(self) -> None:
         if self.pbar: self.pbar.close()
 
+# The Phase Manager: Orchestrates the curriculum and manages the Smart Entropy Defibrillator
 class PhaseManagerCallback(BaseCallback):
     def __init__(self, eval_env, eval_freq_global, tracker, n_eval_episodes=10, state_file=None, verbose=1):
         super().__init__(verbose)
         self.eval_env, self.eval_freq_global, self.tracker, self.n_eval_episodes = eval_env, eval_freq_global, tracker, n_eval_episodes
         self.state_file = state_file or os.path.join(CHECKPOINT_DIR, "cluster_state.json")
-        self.phase_idx, self.last_eval_step, self.best_mean_reward, self.consecutive_regressions = 1, 0, -1000.0, 0
+        self.phase_idx, self.last_eval_step, self.best_mean_reward = 1, 0, -1000.0
         self.consecutive_failures = 0 
+        self.current_ent_coef = 0.07 # Initial exploration bias
         self._load_state()
 
     def set_eval_freq(self, new_freq):
@@ -345,6 +349,7 @@ class PhaseManagerCallback(BaseCallback):
                     self.phase_idx = state.get("phase_idx", 1)
                     self.last_eval_step = state.get("last_eval_step", 0)
                     self.best_mean_reward = state.get("best_mean_reward", -1000.0)
+                    self.current_ent_coef = state.get("current_ent_coef", 0.07)
             except: pass
 
     def save_state(self):
@@ -353,20 +358,29 @@ class PhaseManagerCallback(BaseCallback):
                 json.dump({
                     "phase_idx": int(self.phase_idx),
                     "last_eval_step": int(self.last_eval_step),
-                    "best_mean_reward": float(self.best_mean_reward)
+                    "best_mean_reward": float(self.best_mean_reward),
+                    "current_ent_coef": float(self.current_ent_coef)
                 }, f)
         except: pass
 
-    def _apply_phase(self):
-        """Updates the environments and model for the current phase."""
+    def _apply_phase(self, reset_entropy=False):
+        """Synchronizes curriculum parameters (LR, Entropy) across the cluster."""
         self.training_env.env_method("set_training_phase", self.phase_idx)
         self.eval_env.env_method("set_training_phase", self.phase_idx)
         
+        # Phase-specific Learning Rates
         lr = {1: 1e-4, 2: 1e-4, 3: 1e-4, 4: 5e-5, 5: 5e-5}.get(self.phase_idx, 5e-5)
         self.model.learning_rate = lr
-        print(f"[CURRICULUM] Transitioning to Phase {self.phase_idx}. New LR: {lr}")
+        
+        if reset_entropy:
+            # Baseline curiosity for new acts
+            self.current_ent_coef = 0.05
+            
+        self.model.ent_coef = self.current_ent_coef
+        print(f"[CURRICULUM] Phase {self.phase_idx} active. LR: {lr} | Ent: {self.current_ent_coef:.4f}")
 
     def _run_exam(self):
+        """Executes a 10-episode deterministic mastery test on the evaluation node."""
         current_step = self.model.num_timesteps
         self.last_eval_step = (current_step // self.eval_freq_global) * self.eval_freq_global
         self.save_state()
@@ -378,6 +392,7 @@ class PhaseManagerCallback(BaseCallback):
         if norm_env: norm_env.save(vec_path)
         print(f"[CHECKPOINT] Updated Brain Secured at Step {current_step:,}")
         
+        # Purge old checkpoints
         all_zips = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "sts2_mid_run_step_*.zip")), key=os.path.getmtime)
         while len(all_zips) > 3:
             oldest_zip = all_zips.pop(0)
@@ -421,6 +436,7 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
+        # Curriculum target thresholds
         promo_reward_targets = {1: 200.0, 2: 450.0, 3: 700.0, 4: 650.0, 5: 600.0, 6: 550.0}
         promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0, 4: 51.0, 5: 51.0, 6: 51.0}
         exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51, 5: 51, 6: 51}
@@ -431,6 +447,7 @@ class PhaseManagerCallback(BaseCallback):
         print(f"\n[EXAM] Mean Reward: {mean_reward_final:.2f} | Mean Floor: {mean_floor:.1f}")
         print(f"[EXAM] Successes: {wins}/{self.n_eval_episodes} hit target Floor {target_win_floor}")
         
+        # Persistence of exam report
         latest_stats_path = os.path.join(LOG_DIR, f"latest_exam_stats_step_{current_step}.txt")
         with open(latest_stats_path, "w") as f:
             f.write(f"{'='*40}\n")
@@ -453,38 +470,7 @@ class PhaseManagerCallback(BaseCallback):
             try: os.remove(all_latest.pop(0))
             except: pass
 
-        best_bio_path = os.path.join(LOG_DIR, "best_model_details.json")
-        with open(best_bio_path, "w") as bio_f:
-            json.dump({
-                "global_step": int(current_step),
-                "phase": int(self.phase_idx),
-                "date": str(datetime.datetime.now()),
-                "mean_reward": float(mean_reward_final),
-                "best_reward": float(np.max(total_rewards)),
-                "worst_reward": float(np.min(total_rewards)),
-                "mean_floor": float(mean_floor),
-                "best_floor": int(best_floor),
-                "worst_floor": int(worst_floor),
-                "mean_length": float(mean_len),
-                "consistency_stddev": float(consistency),
-                "success_rate": f"{wins}/{self.n_eval_episodes}"
-            }, bio_f, indent=4)
-
-        prog_log_path = os.path.join(LOG_DIR, "exam_progression_log.csv")
-        prog_data = {
-            "step": [current_step],
-            "phase": [self.phase_idx],
-            "mean_reward": [mean_reward_final],
-            "mean_floor": [mean_floor],
-            "success_rate": [wins / self.n_eval_episodes],
-            "timestamp": [str(datetime.datetime.now())]
-        }
-        df_new = pd.DataFrame(prog_data)
-        if not os.path.exists(prog_log_path):
-            df_new.to_csv(prog_log_path, index=False)
-        else:
-            df_new.to_csv(prog_log_path, mode='a', header=False, index=False)
-
+        # Archive Top-3 brains
         top_log_path = os.path.join(TOP_MODELS_DIR, "top_models_log.json")
         top_entries = []
         if os.path.exists(top_log_path):
@@ -537,10 +523,9 @@ class PhaseManagerCallback(BaseCallback):
 
         if mean_reward_final > self.best_mean_reward:
             self.best_mean_reward = mean_reward_final
-            self.consecutive_regressions = 0
-            self.consecutive_failures = 0
             print(f"[EXAM] Phase Personal Best broken! New Target: {mean_reward_final:.2f}")
 
+        # Promotion / Stagnation / Demotion Control logic
         if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= promo_floor_targets.get(self.phase_idx, 99):
             if self.phase_idx < 6:
                 print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
@@ -556,21 +541,41 @@ class PhaseManagerCallback(BaseCallback):
                 
                 self.phase_idx += 1
                 self.best_mean_reward = -1000.0
-                self.consecutive_regressions = 0
                 self.consecutive_failures = 0
-                self._apply_phase()
+                self._apply_phase(reset_entropy=True)
             else:
                 print(f"\n[MAXED] Training complete. Phase 6 Mastery Achieved.")
         else:
             if wins == 0:
                 self.consecutive_failures += 1
-                print(f"[REGRESSION] No games hit doorstep. Strike {self.consecutive_failures}/3.")
-                if self.consecutive_failures >= 3 and self.phase_idx > 1:
+                print(f"[STAGNATION] Strike {self.consecutive_failures}/5. Failed to hit doorstep (Floor {target_win_floor}).")
+                
+                # Smart Entropy Defibrillator: Spike curiosity if policy is stuck in Act 1
+                if self.consecutive_failures >= 5:
+                    old_ent = self.current_ent_coef
+                    self.current_ent_coef = min(0.15, self.current_ent_coef + 0.02)
+                    self.consecutive_failures = 0
+                    print(f"[DEFIBRILLATOR] Stagnation detected. Boosting Curiosity: {old_ent:.4f} -> {self.current_ent_coef:.4f}")
+                    self._apply_phase(reset_entropy=False)
+                
+                # Step-Down Recovery: Drop 1 Phase if failed 10 times to re-learn foundation
+                total_strikes = getattr(self, 'total_strikes', 0) + 1
+                self.total_strikes = total_strikes
+                if total_strikes >= 10 and self.phase_idx > 1:
                     print(f"[DEMOTION] Policy collapse detected. Stepping down to Phase {self.phase_idx-1}...")
                     self.phase_idx -= 1
                     self.consecutive_failures = 0
+                    self.total_strikes = 0
                     self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 25.0 
-                    self._apply_phase()
+                    self._apply_phase(reset_entropy=True)
+            else:
+                # Progress confirmed: Slowly decay entropy to stabilize the winning policy
+                if self.current_ent_coef > 0.01:
+                    self.current_ent_coef *= 0.98
+                    print(f"[REFINEMENT] Progress confirmed. Decaying curiosity: {self.current_ent_coef:.4f}")
+                    self._apply_phase(reset_entropy=False)
+                self.consecutive_failures = 0
+                self.total_strikes = 0
         
         self.save_state()
         print(f"{'='*60}\n")
@@ -583,6 +588,7 @@ class PhaseManagerCallback(BaseCallback):
         return True
 
 def get_newest_model_and_vec():
+    """Recursively finds the absolute newest .zip and matching .pkl to resume training."""
     all_zips = []
     for root, _, files in os.walk(MODEL_DIR):
         for f in files:
@@ -596,7 +602,7 @@ def get_newest_model_and_vec():
     if not all_zips: return None, None
     
     latest_model = max(all_zips, key=os.path.getmtime)
-    print(f"[SWEEPER] Resuming from absolute newest file: {latest_model}")
+    print(f"[SWEEPER] Resuming from newest file: {latest_model}")
     
     vec_path = latest_model.replace(".zip", ".pkl")
     if os.path.exists(vec_path):
@@ -612,11 +618,12 @@ def get_newest_model_and_vec():
     return latest_model, None
 
 def create_fresh_model(env, n_steps, batch_size, weights_path=None):
+    """Initializes or resumes the MaskablePPO model with the specified hyperparameters."""
     policy_kwargs = dict(features_extractor_class=SynergyCNNExtractor, net_arch=dict(pi=[512, 256], vf=[512, 256]))
     model_params = {
-        "policy": "MlpPolicy", "env": env, "verbose": 1, "tensorboard_log": "./tensorboard/",
+        "policy": "MultiInputPolicy", "env": env, "verbose": 1, "tensorboard_log": "./tensorboard/",
         "device": "auto", "learning_rate": 1e-4, "n_steps": n_steps, "batch_size": batch_size,
-        "n_epochs": 10, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.2, "ent_coef": 0.05,
+        "n_epochs": 10, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.2, "ent_coef": 0.07,
         "vf_coef": 0.7, "policy_kwargs": policy_kwargs
     }
     
@@ -627,7 +634,7 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
             print(f"[LOAD] Success! Full model state restored.")
             return model
         except Exception as e:
-            print(f"[LOAD] Partial load fallback (Parameters mismatch or error): {e}")
+            print(f"[LOAD] Partial load fallback (Parameters mismatch): {e}")
             new_model = MaskablePPO(**model_params)
             old = MaskablePPO.load(weights_path)
             new_model.set_parameters(old.get_parameters())
@@ -637,6 +644,7 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
     return MaskablePPO(**model_params)
 
 def make_env(port, is_eval=False):
+    """Factory function for initializing isolated game environments for the SubprocVecEnv."""
     def _init():
         node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
         # MANUAL CONFIG: Set this base_path to match your local Slay the Spire 2 node directory
@@ -648,6 +656,7 @@ def make_env(port, is_eval=False):
     return _init
 
 def setup_vec_env(ports, vec_path=None, is_eval=False):
+    """Wraps environments into vectorized sub-processes for high-performance synchronous training."""
     vec_env = SubprocVecEnv([make_env(p, is_eval) for p in ports], start_method="spawn") if not is_eval else DummyVecEnv([make_env(p, is_eval) for p in ports])
     if vec_path and os.path.exists(vec_path):
         env = VecNormalize.load(vec_path, vec_env)
@@ -659,8 +668,10 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
     return env
 
 def main():
+    """Master entry point for the training orchestrator."""
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
     
+    # Nuke old engine logs on startup to prevent initial disk choking
     appdata = os.getenv('APPDATA')
     if appdata:
         game_logs_path = os.path.join(appdata, "SlayTheSpire2", "logs")
@@ -682,11 +693,13 @@ def main():
     session_log_dir = os.path.join(tech_log_dir, f"session_{SESSION_ID}")
     os.makedirs(session_log_dir, exist_ok=True)
     new_logger = configure(session_log_dir, ["stdout", "csv", "tensorboard"])
+    
     current_model_file, latest_vec_path = get_newest_model_and_vec()
     train_env = setup_vec_env(ports=TRAIN_PORTS, vec_path=latest_vec_path, is_eval=False)
     eval_env = setup_vec_env(ports=[EVAL_PORT], vec_path=latest_vec_path, is_eval=True)
     tracker = GlobalPerformanceTracker()
     metrics_cb = TensorboardMetricsCallback(tracker)
+    
     start_n_steps, start_batch_size = BUFFER_STAGES[0][0], BUFFER_STAGES[0][1]
     if current_model_file:
         try:
@@ -716,6 +729,7 @@ def main():
             if model.num_timesteps >= stage_end: 
                 continue
 
+            # Stage Handoff: Handle transitions between Batch/Buffer sizes
             if model.n_steps != n_steps:
                 tmp_path = os.path.join(CHECKPOINT_DIR, "transition_temp.zip")
                 tmp_vec = os.path.join(CHECKPOINT_DIR, "transition_temp.pkl")
