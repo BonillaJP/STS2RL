@@ -30,7 +30,8 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
         * **Full Cluster Purge:** Triggered ONLY if `godot.log` exceeds 1GB. The system force-kills ALL nodes simultaneously to release file locks and autonomously deletes the bloated log.
         * **Void Reward System:** To maintain training integrity, any run interrupted by a technical reboot (Deadlock, Bloat, or Engine Bug) is automatically **Voided**. The environment returns a **0.0 reward** (Neutral Abort), ensuring that technical failures do not influence the neural policy.
         * **Deterministic Loop Protection:** Differentiates between **Hard Progress** (changes in Floor, HP, Gold, or Deck Size) and **Screen Progress**. Action-use counters are strictly preserved across screen transitions and only reset when Hard Progress is detected, preventing infinite menu loops.
-        * **Fast Mode Dynamic Polling:** Replaces hardcoded thread sleeps with a high-speed polling loop. During screen transitions, selection actions, and turn ends, the environment polls the game state every 50ms and breaks early the absolute millisecond the state visually updates, ensuring the agent always acts on fresh data.
+        * **Fast Mode Dynamic Polling:** Utilizes a high-speed micro-polling loop. During screen transitions, selection actions, shop purchases, event choices, and turn ends, the environment polls the game state every **10ms** and breaks early the absolute millisecond the state visually updates, ensuring near-instant responses and 100% fresh data without sacrificing training SPS. Max wait for synchronization is capped at **300ms** to maintain high throughput.
+        * **Zero-Latency Restarts:** The `_ensure_fresh_run` loop utilizes an MD5 state hashing mechanism to navigate Game Over screens and main menus at 20Hz (50ms safety throttle), throwing the agent into the next run safely without causing engine thread collisions.
         * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards) to prevent the agent from spamming actions faster than the engine can process them.
         * **Smart Progress Tracking:** Only **Hard Progress** (changes in HP, Gold, Floor, or Deck Size) fully resets the stagnation counter. Selection history progress only grants a small buffer (up to **20 steps**) rather than a full reset, preventing the "flicker-loop" exploit where the agent toggles cards to avoid death penalties.
             * **Compounding Step Tax:** Every action costs a base **-0.01**. If more than 20 steps are taken on a single screen without progress, the tax scales to **-0.10**. This ensures that stalling is always more expensive than the -50.0 death penalty.
@@ -317,4 +318,6 @@ To modify the core behavior of the agent or optimize for different hardware, ref
 * **Deadlock Threshold:** If the agent is training on high Ascension levels where combat lasts longer, the `stagnant_steps` threshold (default 100) may be increased to prevent premature reboots.
 *   **`rejection_penalty`**: Currently set to **-1.0**. 
     *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.
+
+o force better mask adherence.
 

@@ -502,14 +502,20 @@ class SlayTheSpire2Env(gym.Env):
 
     def _ensure_fresh_run(self):
         consecutive_failures = 0
-        for i in range(100):
+        old_hash = ""
+        for i in range(200): # Maximum wait of 2 seconds for API responsiveness
             state = self._raw_state()
             if not state:
                 consecutive_failures += 1
-                if consecutive_failures >= 5:
+                if consecutive_failures >= 10:
                     self._reboot_game_client(reason="API Connection Lost"); return self._ensure_fresh_run()
-                time.sleep(1.0); continue
+                time.sleep(0.1); continue
             consecutive_failures = 0
+            
+            new_hash = hashlib.md5(json.dumps(state, sort_keys=True).encode()).hexdigest()
+            if new_hash == old_hash and state.get("state_type") not in ["monster", "elite", "boss"]:
+                time.sleep(0.01); continue
+            
             screen, menu = state.get("state_type", ""), state.get("menu_screen", "")
             ACTIVE = ["monster", "elite", "boss", "map", "event", "rest_site", "rewards", "card_reward", "shop", "neow", "hand_select", "treasure", "card_select", "bundle_select", "relic_select", "fake_merchant", "crystal_sphere"]
             if screen in ACTIVE: 
@@ -518,6 +524,8 @@ class SlayTheSpire2Env(gym.Env):
                     state = self._raw_state()
                     if not state: break
                 self.current_state = state; return
+            
+            old_hash = new_hash
             
             opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
             if menu == "main":
@@ -555,10 +563,10 @@ class SlayTheSpire2Env(gym.Env):
                         print(f"[CLEANUP] Refreshing profile {target_profile} (Switching {target_profile} -> {alt_profile} -> {target_profile}) to clear ghost saves...")
                         # Step 2: Toggle to alternate profile
                         self._get_session().post(profile_url, json={"action": "switch", "profile_id": alt_profile}, timeout=5.0)
-                        time.sleep(3.0)
+                        time.sleep(1.0)
                         # Step 3: Toggle back to original profile to force metadata refresh
                         self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
-                        time.sleep(3.0)
+                        time.sleep(1.0)
                         self.ghost_save_cleanup_pending = False
                         continue 
                     except: pass
@@ -594,7 +602,8 @@ class SlayTheSpire2Env(gym.Env):
                 else: self._post({"action": "proceed"})
             elif screen == "neow": self._post({"action": "choose_event_option", "index": 0})
             else: self._post({"action": "proceed"})
-            time.sleep(0.5)
+            
+            time.sleep(0.05)
         self._reboot_game_client(reason="API Startup Timeout"); return self._ensure_fresh_run()
 
     def _flatten_state(self, state):
@@ -705,7 +714,10 @@ class SlayTheSpire2Env(gym.Env):
             self.action_cooldowns[k] -= 1
             if self.action_cooldowns[k] <= 0: del self.action_cooldowns[k]
         
-        # Aggressive Storage Bloat Check
+        # Capture state hash baseline for accurate transition detection
+        old_state_hash = hashlib.md5(json.dumps(self.current_state, sort_keys=True).encode()).hexdigest()
+
+        # Storage Bloat Failsafe
         appdata = os.getenv('APPDATA')
         if appdata:
             log_path = os.path.join(appdata, "SlayTheSpire2", "logs", "godot.log")
@@ -775,21 +787,31 @@ class SlayTheSpire2Env(gym.Env):
             if "target_idx" in payload: del payload["target_idx"]
         
         valid = self._post(payload)
-        time.sleep(0.05) # 50ms Stability Throttle
-        new_state = self._raw_state()
         
+        # Wait for API to register the action outcome. 100ms cap.
         if payload.get("action") in ["choose_map_node", "proceed"]:
+            new_state = self._raw_state()
             old_screen = self.current_state.get("state_type")
             for _ in range(40): 
-                if not new_state or new_state.get("state_type") != old_screen: break
+                if not new_state: break
+                if new_state.get("state_type") != old_screen:
+                    st = new_state.get("state_type")
+                    if st == "map" and (new_state.get("map", {}).get("next_options") or new_state.get("map", {}).get("can_proceed")): break
+                    if st in ["event", "neow"] and (new_state.get("event", {}).get("options") or new_state.get("neow", {}).get("options") or new_state.get("event", {}).get("in_dialogue") or new_state.get("neow", {}).get("in_dialogue")): break
+                    if st == "rewards" and (new_state.get("rewards", {}).get("items") or new_state.get("rewards", {}).get("can_proceed")): break
+                    if st == "treasure" and (new_state.get("treasure", {}).get("items") or new_state.get("treasure", {}).get("can_proceed")): break
+                    if st not in ["map", "event", "neow", "rewards", "treasure"]: break
                 time.sleep(0.05); new_state = self._raw_state()
-        elif payload.get("action") in ["select_card", "combat_select_card", "select_card_reward", "claim_reward", "end_turn"]:
-            # High-speed polling: Wait up to 500ms for any visual state change.
-            # Prevents acting on stale frames during selection and turn transitions.
-            old_state_dump = json.dumps(self.current_state, sort_keys=True)
-            for _ in range(10):
-                if not new_state or json.dumps(new_state, sort_keys=True) != old_state_dump: break
-                time.sleep(0.05); new_state = self._raw_state()
+        elif payload.get("action") in ["select_card", "combat_select_card", "select_card_reward", "claim_reward", "end_turn", "confirm_selection", "combat_confirm_selection", "cancel_selection", "skip_card_reward", "skip_relic_selection", "claim_treasure_relic", "select_bundle", "confirm_bundle_selection", "select_relic", "shop_purchase", "choose_event_option", "advance_dialogue", "choose_rest_option", "menu_select"]:
+            new_state = self._raw_state()
+            for _ in range(30): # Max 300ms
+                if not new_state: break
+                new_hash = hashlib.md5(json.dumps(new_state, sort_keys=True).encode()).hexdigest()
+                if new_hash != old_state_hash: break
+                time.sleep(0.01); new_state = self._raw_state()
+        else:
+            time.sleep(0.05) # 50ms Stability Throttle for combat/standard actions
+            new_state = self._raw_state()
 
         if not valid or not new_state:
             time.sleep(0.05); new_state = self._raw_state()
@@ -806,7 +828,7 @@ class SlayTheSpire2Env(gym.Env):
         if new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
             for _ in range(100):
                 time.sleep(0.05); new_state = self._raw_state()
-                if not new_state or new_state.get("battle", {}).get("is_play_phase") or any(k in new_state for k in OVERLAY_KEYS) or "hand_select" in new_state: break
+                if not new_state or new_state.get("state_type") not in ["monster", "elite", "boss"] or new_state.get("battle", {}).get("is_play_phase") or any(k in new_state for k in OVERLAY_KEYS) or "hand_select" in new_state: break
         
         b_breakdown = {"floor": 0.0, "dmg": 0.0, "hp": 0.0, "bounty": 0.0, "tax": 0.0}
         new_screen, floor_now = new_state.get("state_type", ""), new_state.get("run", {}).get("floor", 0)
