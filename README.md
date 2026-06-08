@@ -16,7 +16,10 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 
 * **Synergy-CNN Vision:** The agent processes its hand using a 1D-Convolutional branch, allowing it to "scan" for card combos rather than just reading raw scalar numbers.
 * **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's logic. The environment performs a **Fresh API Fetch** at the start of every Step cycle and utilizes a high-performance cache for masking, preventing desyncs without sacrificing training throughput (FPS).
-* **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **One-Way Gate** selection system.
+* **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **Smart Commitment Gate** selection system.
+    * **Action-use cap:** Automatically masks any action used more than **20 times** on the same screen to prevent policy loops and deadlocks.
+    * **Smart Commitment Rule:** In multi-card selection overlays, the `cancel_selection` action is only disabled **after** the selection requirement is met. This stops menu flickering exploits while allowing the agent to swap choices if the requirement isn't satisfied yet.
+    * **One-Way Combat Overlays:** For single-card combat overlays (like Scry or Exhaust), the system enforces a one-way selection to ensure deterministic progression.
     * **Zero-Reboot Grade Stability:**
         * **Patient API Fetching (Level 1):** Implements a robust state retriever that performs **20 micro-retries** (10ms intervals) before declaring an API failure. This allows the Godot engine up to **10 seconds** to finish room transitions and loading spikes without triggering technical reboots.
         * **60s Startup Safety (Level 2):** The orchestrator provides a generous **60-second window** for the game to reach the Main Menu during reboots, physically preventing the "Murder Loop" where the script kills the game while it is still booting.
@@ -27,13 +30,15 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
         * **Full Cluster Purge:** Triggered ONLY if `godot.log` exceeds 1GB. The system force-kills ALL nodes simultaneously to release file locks and autonomously deletes the bloated log.
         * **Void Reward System:** To maintain training integrity, any run interrupted by a technical reboot (Deadlock, Bloat, or Engine Bug) is automatically **Voided**. The environment returns a **0.0 reward** (Neutral Abort), ensuring that technical failures do not influence the neural policy.
         * **Deterministic Loop Protection:** Differentiates between **Hard Progress** (changes in Floor, HP, Gold, or Deck Size) and **Screen Progress**. Action-use counters are strictly preserved across screen transitions and only reset when Hard Progress is detected, preventing infinite menu loops.
-        * **Fast Mode Dynamic Polling:** Replaces hardcoded thread sleeps with a high-speed polling loop. During screen transitions, the environment polls the game state every 50ms, instantly resuming training the absolute millisecond the transition finishes.
+        * **Fast Mode Dynamic Polling:** Replaces hardcoded thread sleeps with a high-speed polling loop. During screen transitions, the environment polls the game state every 50ms and breaks early if an overlay screen is detected, instantly resuming training the absolute millisecond the transition finishes.
         * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards) to prevent the agent from spamming actions faster than the engine can process them.
-        * **Smart Progress Tracking:** Stagnation counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 200-step reboot failsafe only triggers for true engine freezes.
-    * **Absolute path-based Force-Kill:** The reboot logic performs an exhaustive path-based cleanup of the node's specific folder before relaunching to prevent duplicate game instances.
+        * **Smart Progress Tracking:** Only **Hard Progress** (changes in HP, Gold, Floor, or Deck Size) fully resets the stagnation counter. Selection history progress only grants a small buffer (up to **20 steps**) rather than a full reset, preventing the "flicker-loop" exploit where the agent toggles cards to avoid death penalties.
+            * **Compounding Step Tax:** Every action costs a base **-0.01**. If more than 20 steps are taken on a single screen without progress, the tax scales to **-0.10**. This ensures that stalling is always more expensive than the -50.0 death penalty.
+            * **Absolute path-based Force-Kill:** The reboot logic performs an exhaustive path-based cleanup of the node's specific folder before relaunching to prevent duplicate game instances.
+
     * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, forcing the agent to resolve choices before fighting to prevent deadlocks.
     * **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers, preventing "Thread Collisions" and hard crashes.
-    * **Boss-Only Map Proceed:** The map `proceed` button is strictly disabled unless the agent is on a Boss Floor (16, 33, 51), preventing the "Fake Proceed" trap.
+    * **Boss-Only Map Proceed:** The map `proceed` button is strictly disabled unless the agent is on a Boss Floor (17, 33, 48), preventing the "Fake Proceed" trap.
     * **Real-Map Verification:** The environment only identifies the screen as "map" if actual navigation nodes are present in the API response.
 * **Stagnation Detection & Failsafes:** Built-in orchestrator that detects engine bugs, infinite loops, or **API/State Invalid** errors. It automatically reboots the specific game node and triggers a **Neutral Abort (0.0 reward)** to protect the model's policy.
 * **Deadlock Recovery:** Lowers the technical reboot timer to **200 stagnant steps**, ensuring high cluster uptime and fast self-healing from rare engine freezes.
@@ -185,7 +190,8 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 * **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update.
 * **Hall of Fame:** If a high score is achieved during a rollout, the **updated brain** (containing the new learning) is saved to `hall_of_fame/` at the start of the next update iteration.
 * **Ultimate Best:** Reserved for **Phase Promotions**. When an agent successfully completes a Phase, its graduating brain is secured in the `ultimate_best/` directory for historical reference.
-* **Smart Entropy Defibrillator:** To prevent behavioral "ruts" in Act 1, the orchestrator implements a dynamic curiosity spike. If the agent fails to reach the Act 1 Boss for **10 consecutive exams** (~90k steps), the `ent_coef` is automatically increased (+0.02) to force exploration of new card synergies. Upon success, entropy slowly decays to stabilize the policy, and resets to baseline upon Act promotion. This physically prevents the agent from overfitting to a mediocre Act 1 strategy.
+* **Smart Entropy Defibrillator:** To prevent behavioral "ruts", the orchestrator implements a dynamic curiosity spike. The initial `ent_coef` is calibrated to **0.10** for aggressive discovery. If the agent fails to reach the Act Boss for **5 consecutive exams**, the `ent_coef` is automatically increased (+0.05) up to a max of **0.25** to force exploration of new card synergies. Upon success, entropy decays (0.90x) to quickly stabilize the winning policy, and resets to baseline upon Act promotion.
+
 * **Strike Persistence:** Stagnation strikes are recorded in `cluster_state.json`, ensuring the brain's "frustration" is preserved across curriculum transitions and cluster reboots.
 
 ### 📊 Persistent Data & Session Logging
@@ -198,7 +204,7 @@ To guarantee 100% data integrity across cluster reboots, the project implements 
 A highly specialized, multi-layered reward system was designed to balance short-term survival with long-term scaling:
 
 * **Step Tax (`-0.01`):** A minimal flat penalty applied to every single action. This allows the agent to safely scale in long Ascension 8+ fights.
-* **Death Penalty (`-50.0`):** A massive flat penalty applied upon reaching the game over screen.
+* **Tapered Death Penalty (The "Slope of Courage"):** Replaces the flat penalty with a mathematical gradient for early Phases. Formula: `Penalty = -50.0 + (min(Floor / Phase_Target, 1.0) * 40.0)`. Dying early is heavily penalized (e.g., -47.5), but dying deep in an Act near the Boss is forgiven (e.g., -12.5), naturally pulling the agent deeper into the Spire without allowing suicide exploits.
 * **Combat Stall Penalty:** If a fight exceeds 20 turns, a compounding penalty (`-0.1` per extra turn) is applied. This prevents "infinite defense" loops and forces the agent to find efficient killing patterns.
 * **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps.
     * **15+ steps:** `-2.0` penalty per action.
@@ -216,8 +222,8 @@ A highly specialized, multi-layered reward system was designed to balance short-
 * **HP Delta (Dynamic Strictness):** Dynamic rewards (**`+0.1`** per enemy HP damage dealt). Damage rewards are calculated using a **Unique Enemy Key** (ID + Position) to ensure 100% mathematical accuracy.
     * *Note: Class-specific passive bonuses (like Ironclad's Burning Blood) are naturally integrated into the HP Delta system, providing additional positive reinforcement for successful combat victories.*
 * **The Universal Bounty Matrix:** To prevent exponential point inflation across acts, rewards are flattened into universal constants:
-    * *Standard Bounties:* **Floor (+10.0)**, **Boss Kill (+100.0)**, **Elite Kill (+30.0)**, **Smith (+15.0 Base)**.
-    * **Boss Sight Bounty (+50.0):** Immediate reward for reaching Floor 16, 33, or 51. Incentivizes reaching the end of an act as a primary victory.
+    * *Standard Bounties:* **Floor (+10.0)**, **Boss Kill (+100.0)**, **Elite Kill (+15.0)**, **Smith (+15.0 Base)**.
+    * **Boss Sight Bounty (+50.0):** Immediate reward for reaching Floor 17, 33, or 48. Incentivizes reaching the end of an act as a primary victory.
     * **Smart Card Removal (+15.0):** Granted only when a **Basic card** (rarity: Basic) is removed from the deck, encouraging pro-level deck thinning.
     * **Elite Ambition (Pathing):** Grants **+5.0** for entering an elite room while healthy (>50% HP) and **-15.0** for entering while critical (<30% HP).
     * **Early Foundation (+2.0):** Rewards adding any card during Act 1 (Floors 1-15) to ensure a strong starting deck.
@@ -230,19 +236,22 @@ In early iterations, the agent suffered from "superstitious learning" or simply 
 RL is highly sensitive to reward shaping. Experimentation is highly encouraged—alter these numbers in `sts2_env.py` to test new hypotheses, experiment with new topologies, or incentivize entirely different playstyles.
 
 ### Phased Mastery Training (6-Phase Curriculum)
-The agent progresses through a dynamic curriculum (Phase 1 to Phase 6). Progression requires passing a "Mastery Exam" on the dedicated Evaluation Node.
+The agent progresses through a dynamic curriculum (Phase 1 to Phase 6). Progression requires passing a 10-episode deterministic exam on the dedicated Evaluation Node.
 
 **Promotion Requirements:**
-To advance to the next phase, the agent must meet both a Mean Floor and Mean Reward target during its 10-episode exam.
-* **Phase 1 (Act 1 - Floor 16):** Requires Mean Floor >= 16.0 AND Mean Reward >= 200.0.
-* **Phase 2 (Act 2 - Floor 33):** Requires Mean Floor >= 33.0 AND Mean Reward >= 450.0.
-* **Phase 3 (Act 3 - Floor 50):** Requires Mean Floor >= 50.0 AND Mean Reward >= 700.0.
-* **Phase 4 (Ascension 1-4):** Requires Mean Floor >= 51.0 AND Mean Reward >= 650.0.
-* **Phase 5 (Ascension 5-8):** Requires Mean Floor >= 51.0 AND Mean Reward >= 600.0.
-* **Phase 6 (Ascension 9-10):** Requires Mean Floor >= 51.0 AND Mean Reward >= 550.0.
+The curriculum is split into two distinct learning philosophies to prevent early-game bottlenecks:
+- **Experience-First (Phases 1-3):** Reward scores are completely ignored for promotion. The agent promotes if it successfully reaches the target Act Boss floor at least 3 out of 10 times (`wins >= 3`).
+- **Mastery-Based (Phases 4-6):** The agent must meet BOTH a strict Mean Floor (48.0) AND a high Mean Reward target to prove true endgame mastery.
+
+* **Phase 1 (Act 1 - Floor 17):** Requires Wins >= 3/10.
+* **Phase 2 (Act 2 - Floor 33):** Requires Wins >= 3/10.
+* **Phase 3 (Act 3 - Floor 48):** Requires Wins >= 3/10.
+* **Phase 4 (Ascension 1-4):** Requires Mean Floor >= 48.0 AND Mean Reward >= 700.0.
+* **Phase 5 (Ascension 5-8):** Requires Mean Floor >= 48.0 AND Mean Reward >= 650.0.
+* **Phase 6 (Ascension 9-10):** Requires Mean Floor >= 48.0 AND Mean Reward >= 600.0.
 
 **Demotion (Step-Down Recovery):**
-If performance stalls in Phase 2+, the system implements a recovery step-down. If the agent fails to reach the doorstep thresholds (Floor 16, 33, or 50) for **3 consecutive exams**, it drops down exactly 1 Phase.
+If performance stalls and the policy collapses in Phase 2+, the system implements a recovery step-down. If the agent strikes out completely 20 times (20 failed exams), it drops down exactly 1 Phase.
 
 ## 🛠️ Prerequisites
 
@@ -299,7 +308,7 @@ To modify the core behavior of the agent or optimize for different hardware, ref
 *   **`BUFFER_STAGES`**: A curriculum list where each entry is `(Batch Size, Steps per Update, Max Step)`. 
     *   *Tip:* If your GPU memory is low, decrease the **Batch Size** (e.g., 3072 -> 1024).
 *   **`ent_coef`**: Controls the entropy coefficient (exploration). 
-    *   *Tip:* Set this to **0.05** for early training (Phase 1-2). The **Smart Entropy Defibrillator** will automatically boost this if the agent becomes stuck in a tactical rut in Act 1.
+    *   *Tip:* Set this to **0.10** for early training (Phase 1-3). The **Smart Entropy Defibrillator** will automatically boost this if the agent becomes stuck in a tactical rut in Act 1.
 *   **`learning_rate`**: Fixed at **1e-4** for early acts. If the agent's policy collapses (High `approx_kl`), lower this to **5e-5**.
 
 ### 2. Environment Stability (`sts2_env.py`)

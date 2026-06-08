@@ -97,6 +97,7 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_gold = -1
         self.last_prog_energy = -1
         self.last_prog_deck_size = -1
+        self.last_prog_relic_count = -1
         self.last_prog_basic_card_count = -1
         self.last_prog_enemy_block_sum = -1
         self.last_prog_player_block = -1
@@ -402,7 +403,7 @@ class SlayTheSpire2Env(gym.Env):
             next_nodes = map_data.get("next_options", [])
             selectable_nodes = [o.get("index") for o in next_nodes if o.get("is_selectable", True)]
             set_mask(155, 5, selectable_nodes)
-            is_boss_floor = state.get("run", {}).get("floor", 0) in [16, 33, 51]
+            is_boss_floor = state.get("run", {}).get("floor", 0) in [17, 33, 48]
             # Boss proceed button is only enabled on Boss floors
             if not selectable_nodes and map_data.get("can_proceed") and is_boss_floor: mask[123] = True
             else: mask[123] = False
@@ -424,9 +425,12 @@ class SlayTheSpire2Env(gym.Env):
                     merged_selected = set(selected_indices) | set(map(str, self.internal_selection_history))
                     if len(merged_selected) < max_sel:
                         set_mask(160, 25, [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in merged_selected])
-                if can_confirm or num_selected >= max_sel: mask[185] = True
-                if num_selected > 0: mask[186] = False
-                elif cs.get("can_cancel"): mask[186] = True
+                if can_confirm or num_selected >= max_sel: 
+                    mask[185] = True
+                    mask[186] = False # Commitment Gate: Lock once requirement is met
+                else:
+                    if num_selected > 0: mask[186] = True
+                    elif cs.get("can_cancel"): mask[186] = True
             else:
                 set_mask(160, 25, [c.get("index") for c in cs.get("cards", [])])
                 if cs.get("can_cancel"): mask[186] = True
@@ -452,10 +456,9 @@ class SlayTheSpire2Env(gym.Env):
         for i, m in enumerate(MENU_OPTS):
             if m.lower() in opts and m.lower() != "settings": mask[205 + i] = True
 
-        # Action-use cap: mask any action used more than 10 times on the same screen to prevent policy loops
+        # Action-use cap: mask any action used more than 20 times on the same screen to prevent policy loops
         for act_idx, count in self.state_action_counts.items():
-            if count >= 10: mask[act_idx] = False 
-
+            if count >= 20: mask[act_idx] = False 
         if screen != "map": mask[155:160] = False
 
         # Smart Kick: fallback for masked-rejection loops or deadlock recovery
@@ -796,7 +799,7 @@ class SlayTheSpire2Env(gym.Env):
         if new_state and new_state.get("state_type") in ["monster", "elite", "boss"] and new_state.get("battle", {}).get("is_play_phase") == False:
             for _ in range(100):
                 time.sleep(0.05); new_state = self._raw_state()
-                if not new_state or new_state.get("battle", {}).get("is_play_phase"): break
+                if not new_state or new_state.get("battle", {}).get("is_play_phase") or any(k in new_state for k in OVERLAY_KEYS) or "hand_select" in new_state: break
         
         b_breakdown = {"floor": 0.0, "dmg": 0.0, "hp": 0.0, "bounty": 0.0, "tax": 0.0}
         new_screen, floor_now = new_state.get("state_type", ""), new_state.get("run", {}).get("floor", 0)
@@ -817,6 +820,11 @@ class SlayTheSpire2Env(gym.Env):
         if payload.get("action") == "use_potion" and new_screen in ["elite", "boss"]:
             b_breakdown["bounty"] += 2.0
 
+        # Relic Hunter: +25.0 for acquiring a new relic.
+        current_relic_count = len(player_now.get("relics", []))
+        if current_relic_count > self.last_prog_relic_count and self.last_prog_relic_count >= 0:
+            b_breakdown["bounty"] += 25.0
+
         # Bounties
         if self.last_prog_screen == "elite" and new_screen == "rewards": self.pending_elite_bounty = True
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
@@ -836,23 +844,25 @@ class SlayTheSpire2Env(gym.Env):
             self.combat_turn_count = 0
 
         # Time/Efficiency Taxes
-        b_breakdown["tax"] -= 0.01 # Base action cost
+        base_tax = 0.01
+        if self.stagnant_steps > 20: base_tax = 0.10
+        b_breakdown["tax"] -= base_tax
+
         if self.combat_turn_count > 20: b_breakdown["tax"] -= (self.combat_turn_count - 20) * 0.1
         if self.stagnant_steps > 50: b_breakdown["tax"] -= 20.0
         elif self.stagnant_steps > 30: b_breakdown["tax"] -= 5.0
         elif self.stagnant_steps > 15: b_breakdown["tax"] -= 2.0
-
         if floor_now > self.previous_floor:
             # Floor Milestone: Fixed +10 per floor climbed.
             b_breakdown["floor"] += 10.0
             
-            # Boss Room: +50 for reaching floor 16, 33, or 51.
-            if floor_now in [16, 33, 51]:
+            # Boss Room: +50 for reaching floor 17, 33, or 48.
+            if floor_now in [17, 33, 48]:
                 b_breakdown["bounty"] += 50.0
 
             # Completion Bounties: Triggered when exiting a room via the rewards screen.
             if self.pending_boss_bounty: b_breakdown["bounty"] += 100.0; self.pending_boss_bounty = False
-            if self.pending_elite_bounty: b_breakdown["bounty"] += 30.0; self.pending_elite_bounty = False
+            if self.pending_elite_bounty: b_breakdown["bounty"] += 15.0; self.pending_elite_bounty = False
             if self.pending_smith_bounty:
                 # Dynamic Smithing: Scales based on health. Higher HP = more reward for upgrading.
                 s_m = 1.5 if hp_ratio > 0.9 else 1.2 if hp_ratio > 0.8 else 1.0 if hp_ratio > 0.5 else 0.2 if hp_ratio > 0.3 else -2.0
@@ -891,7 +901,8 @@ class SlayTheSpire2Env(gym.Env):
                      player_now.get("gold", 0) != self.last_prog_gold or
                      player_now.get("block", 0) != self.last_prog_player_block or
                      player_now.get("energy", 0) != self.last_prog_energy or
-                     len(player_now.get("deck", [])) != self.last_prog_deck_size)
+                     len(player_now.get("deck", [])) != self.last_prog_deck_size or
+                     len(player_now.get("relics", [])) != self.last_prog_relic_count)
         screen_prog = (new_screen != self.last_prog_screen)
 
         sel_count = len(self.internal_selection_history)
@@ -903,8 +914,8 @@ class SlayTheSpire2Env(gym.Env):
         elif screen_prog:
             self.stagnant_steps, self.state_rejection_count = 0, 0
             self.sel_prog_steps = 0
-        elif sel_prog and getattr(self, 'sel_prog_steps', 0) < 10:
-            self.stagnant_steps, self.state_rejection_count = 0, 0
+        elif sel_prog and getattr(self, 'sel_prog_steps', 0) < 20:
+            self.state_rejection_count = 0
             self.sel_prog_steps = getattr(self, 'sel_prog_steps', 0) + 1
         else: self.stagnant_steps += 1
         self.last_sel_count = sel_count
@@ -915,6 +926,7 @@ class SlayTheSpire2Env(gym.Env):
 
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = new_screen, floor_now, curr_hp_sum, player_now.get("gold", 0)
         self.last_prog_player_block, self.last_prog_energy, self.last_prog_deck_size = player_now.get("block", 0), player_now.get("energy", 0), len(player_now.get("deck", []))
+        self.last_prog_relic_count = len(player_now.get("relics", []))
 
         if self.total_episode_steps >= 1500:
             self.reboot_reason = "Timeout (1500 Steps)"; self.needs_reboot = True
@@ -922,9 +934,16 @@ class SlayTheSpire2Env(gym.Env):
 
         reward = sum(b_breakdown.values())
         if new_screen == "game_over":
-            reward -= 50.0; terminated = True
-            self._log_action(f"-> FATAL: Game Over. Penalty: -50.0")
-        elif floor_now == 51: terminated = True
+            if self.training_phase <= 3:
+                phase_targets = {1: 17, 2: 33, 3: 48}
+                target = phase_targets.get(self.training_phase, 48)
+                death_penalty = -50.0 + (min(floor_now / target, 1.0) * 40.0)
+            else:
+                death_penalty = -50.0
+            reward += death_penalty; terminated = True
+            self._log_action(f"-> FATAL: Game Over. Penalty: {death_penalty:.1f}")
+        elif new_state.get("run", {}).get("is_victory", False): 
+            terminated = True
         self.current_state = new_state
 
         obs = self._flatten_state(new_state)
@@ -949,5 +968,6 @@ class SlayTheSpire2Env(gym.Env):
         self.action_cooldowns = {}
         self.last_prog_screen, self.last_prog_floor, self.last_prog_hp_sum, self.last_prog_gold = "none", -1, -1, -1
         self.last_prog_energy, self.last_prog_player_block, self.last_prog_deck_size = -1, -1, -1
+        self.last_prog_relic_count = -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
         self.lowest_enemy_hp_seen = {}; return self._flatten_state(state), {}

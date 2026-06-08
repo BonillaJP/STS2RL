@@ -335,9 +335,8 @@ class PhaseManagerCallback(BaseCallback):
         self.state_file = state_file or os.path.join(CHECKPOINT_DIR, "cluster_state.json")
         self.phase_idx, self.last_eval_step, self.best_mean_reward = 1, 0, -1000.0
         self.consecutive_failures = 0 
-        self.current_ent_coef = 0.07 # Initial exploration bias
+        self.current_ent_coef = 0.05 # Initial exploration bias
         self._load_state()
-
     def set_eval_freq(self, new_freq):
         self.eval_freq_global = new_freq
 
@@ -378,7 +377,7 @@ class PhaseManagerCallback(BaseCallback):
         
         if reset_entropy:
             # Baseline curiosity for starting a new Act.
-            self.current_ent_coef = 0.05
+            self.current_ent_coef = 0.10
             
         self.model.ent_coef = self.current_ent_coef
         print(f"[CURRICULUM] Phase {self.phase_idx} active. LR: {lr} | Ent: {self.current_ent_coef:.4f}")
@@ -442,11 +441,10 @@ class PhaseManagerCallback(BaseCallback):
         consistency = np.std(total_floors)
         
         # Graduation Requirements
-        promo_reward_targets = {1: 200.0, 2: 450.0, 3: 700.0, 4: 650.0, 5: 600.0, 6: 550.0}
-        promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0, 4: 51.0, 5: 51.0, 6: 51.0}
-        exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51, 5: 51, 6: 51}
+        promo_reward_targets = {4: 700.0, 5: 650.0, 6: 600.0}
+        exam_win_floors = {1: 17, 2: 33, 3: 48, 4: 48, 5: 48, 6: 48}
         
-        target_win_floor = exam_win_floors.get(self.phase_idx, 51)
+        target_win_floor = exam_win_floors.get(self.phase_idx, 48)
         wins = sum(1 for f in total_floors if f >= target_win_floor)
         
         print(f"\n[EXAM] Mean Reward: {mean_reward_final:.2f} | Mean Floor: {mean_floor:.1f}")
@@ -566,7 +564,16 @@ class PhaseManagerCallback(BaseCallback):
             print(f"[EXAM] Phase Personal Best broken! New Target: {mean_reward_final:.2f}")
 
         # Curriculum Controls: Promotion / Defibrillation / Demotion
-        if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= promo_floor_targets.get(self.phase_idx, 99):
+        is_promoted = False
+        if self.phase_idx <= 3:
+            # Phases 1-3: Experience First. Promote purely on reach-rate (wins >= 3).
+            if wins >= 3: is_promoted = True
+        else:
+            # Phases 4-6: Mastery. Promote on BOTH high reward and reaching floor 48.
+            if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= 48.0:
+                is_promoted = True
+
+        if is_promoted:
             if self.phase_idx < 6:
                 print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
                 
@@ -588,12 +595,12 @@ class PhaseManagerCallback(BaseCallback):
         else:
             if wins == 0:
                 self.consecutive_failures += 1
-                print(f"[STAGNATION] Strike {self.consecutive_failures}/10. Failed to hit doorstep (Floor {target_win_floor}).")
+                print(f"[STAGNATION] Strike {self.consecutive_failures}/5. Failed to hit doorstep (Floor {target_win_floor}).")
                 
-                # Entropy Defibrillator: Increases ent_coef by +0.02 after 10 failed exams.
-                if self.consecutive_failures >= 10:
+                # Entropy Defibrillator: Increases ent_coef by +0.05 after 5 failed exams.
+                if self.consecutive_failures >= 5:
                     old_ent = self.current_ent_coef
-                    self.current_ent_coef = min(0.15, self.current_ent_coef + 0.02)
+                    self.current_ent_coef = min(0.25, self.current_ent_coef + 0.05)
                     self.consecutive_failures = 0
                     print(f"[DEFIBRILLATOR] Stagnation detected. Boosting Curiosity: {old_ent:.4f} -> {self.current_ent_coef:.4f}")
                     self._apply_phase(reset_entropy=False)
@@ -609,9 +616,9 @@ class PhaseManagerCallback(BaseCallback):
                     self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 25.0 
                     self._apply_phase(reset_entropy=True)
             else:
-                # Entropy Decay: Progress confirmed; reduce curiosity by 0.98x per cycle.
+                # Entropy Decay: Progress confirmed; reduce curiosity by 0.90x per cycle.
                 if self.current_ent_coef > 0.01:
-                    self.current_ent_coef *= 0.98
+                    self.current_ent_coef *= 0.90
                     print(f"[REFINEMENT] Progress confirmed. Decaying curiosity: {self.current_ent_coef:.4f}")
                     self._apply_phase(reset_entropy=False)
                 self.consecutive_failures = 0
@@ -666,8 +673,9 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
     model_params = {
         "policy": "MultiInputPolicy", "env": env, "verbose": 1, "tensorboard_log": "./tensorboard/",
         "device": "auto", "learning_rate": 1e-4, "n_steps": n_steps, "batch_size": batch_size,
-        "n_epochs": 10, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.2, "ent_coef": 0.07,
+        "n_epochs": 10, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.2, "ent_coef": 0.05,
         "vf_coef": 0.7, "policy_kwargs": policy_kwargs
+
     }
     
     if weights_path and os.path.exists(weights_path):
