@@ -783,6 +783,13 @@ class SlayTheSpire2Env(gym.Env):
             for _ in range(40): 
                 if not new_state or new_state.get("state_type") != old_screen: break
                 time.sleep(0.05); new_state = self._raw_state()
+        elif payload.get("action") in ["select_card", "combat_select_card", "select_card_reward", "claim_reward", "end_turn"]:
+            # High-speed polling: Wait up to 500ms for any visual state change.
+            # Prevents acting on stale frames during selection and turn transitions.
+            old_state_dump = json.dumps(self.current_state, sort_keys=True)
+            for _ in range(10):
+                if not new_state or json.dumps(new_state, sort_keys=True) != old_state_dump: break
+                time.sleep(0.05); new_state = self._raw_state()
 
         if not valid or not new_state:
             time.sleep(0.05); new_state = self._raw_state()
