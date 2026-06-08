@@ -29,7 +29,7 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
         * **Deterministic Loop Protection:** Differentiates between **Hard Progress** (changes in Floor, HP, Gold, or Deck Size) and **Screen Progress**. Action-use counters are strictly preserved across screen transitions and only reset when Hard Progress is detected, preventing infinite menu loops.
         * **Fast Mode Dynamic Polling:** Replaces hardcoded thread sleeps with a high-speed polling loop. During screen transitions, the environment polls the game state every 50ms, instantly resuming training the absolute millisecond the transition finishes.
         * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards) to prevent the agent from spamming actions faster than the engine can process them.
-        * **Smart Progress Tracking:** Stagnation counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 100-step reboot failsafe only triggers for true engine freezes.
+        * **Smart Progress Tracking:** Stagnation counters are automatically reset if the system detects changes in **HP, Gold, Floor, Screen Type, Energy, Block, Deck Size, or Card Selection history.** This ensures the 200-step reboot failsafe only triggers for true engine freezes.
     * **Absolute path-based Force-Kill:** The reboot logic performs an exhaustive path-based cleanup of the node's specific folder before relaunching to prevent duplicate game instances.
     * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, forcing the agent to resolve choices before fighting to prevent deadlocks.
     * **Safe Throttle:** Implements a global **50ms input delay** (0.05s) to provide a safety buffer for the Godot engine's C# animation handlers, preventing "Thread Collisions" and hard crashes.
@@ -123,27 +123,46 @@ The environment features a five-layer **Self-Healing** system to handle engine c
 ### 1. The State Observation Vector (1536 Floats)
 The environment translates the raw JSON game state into a massive, flattened observation vector to feed into the neural network. This allows the model to "see" every aspect of the game state simultaneously:
 * **Observation Space:** `spaces.Box(low=-1.0, high=1.0, shape=(1536,), dtype=np.float32)`
-    * **[0-10]**: Core Meta State (Floor, HP Ratio, Gold, current Act, Ascension level).
-    * **[10-20]**: Pile Metadata (Draw, Discard, and Exhaust pile counts).
-    * **[20-50]**: Player Status Effects (Detailed parsing for Strength, Dexterity, Vulnerable, etc.).
-    * **[55-70]**: Orb States (Support for the Defect's unique mechanics).
-    * **[70-120]**: Potion Bar (IDs, usability flags, and slot mapping).
-    * **[120-320]**: Enemy Vision (Entity IDs, HP Ratios, Block, and detailed Intent Damage labels for up to 5 enemies).
-    * **[320-620]**: Hand Vision (Full encoding for 10 cards: ID, Cost, Upgrades, and Keywords like 'Exhaust' or 'Block').
-    * **[620-870]**: Dynamic Screen Logic (Handling Shop item costs, Reward item types, and Relic choice indices).
-    * **[870-1370]**: Full Map Vision (The complete layout of the current act's navigation nodes).
-    * **[1370-1536]**: Specialized States (Support for the Crystal Sphere minigame and Summoned Pets).
+    * **[0-10]: Core Meta State:** Tracks the absolute fundamentals: Current Floor, HP Ratio, Max HP scaling, Gold, Act number, and Ascension level.
+    * **[10-20]: Pile Metadata:** Dedicated indices for the size of the Draw, Discard, and Exhaust piles.
+    * **[20-50]: Player Status Effects:** Comprehensive parsing for 15+ status effects including Strength, Dexterity, Vulnerable, Weak, Artifact, and specialized STS2 buffs like soul's power.
+    * **[55-70]: Orb States:** Dynamic mapping for channeled orbs (identity and count), supporting the Defect's unique mechanical scaling.
+    * **[70-120]: Potion Bar:** High-resolution mapping for 5 potion slots, including unique ID hashes and usable/unusable boolean flags.
+    * **[120-320]: Enemy Vision:** Detailed data for up to 5 enemies simultaneously. For each entity, the network sees: Unique ID Hash, HP Ratio, Block sum, and Intent Damage (including multi-hit labels).
+    * **[320-620]: Hand & Card Vision (CNN Input):** The primary intelligence block. Maps the 10 leftmost cards in hand across 30 points each:
+        * Identity Hash, Energy Cost, Upgrade Status (+), and Keyword Scans (Block, Damage, Exhaust, Strength, Enchantments).
+    * **[620-870]: Dynamic Screen Logic:** Indices that change based on context. Tracks Shop item costs, Reward item types, and Relic choice indices during selection events.
+    * **[870-1370]: Full Map Vision:** A massive mapping of 50 navigation nodes. Each node includes its coordinate (Col/Row) and Room Type (Elite, Merchant, Rest, etc.).
+    * **[1370-1536]: Specialized States:** Support for the Crystal Sphere 9x11 grid (indices 1370-1469), Summoned Pets (1469-1511), and Event-specific choice flags (1511-1536).
 
 ### 2. The Action Space (317 Discrete Actions)
 A fully flattened discrete space representing exactly 317 possible interactions, categorized as:
-*   **[0-49]**: `play_card` (Targets for 10 card slots * 5 possible enemies).
-*   **[50-74]**: `use_potion` (5 slots * 5 targets).
-*   **[75-79]**: `discard_potion`.
-*   **[80]**: `end_turn`.
-*   **[124-133]**: `choose_event_option` (Dialogue selections).
-*   **[140-154]**: `shop_purchase` (Merchant inventory).
-*   **[155-159]**: `choose_map_node` (Navigating the Spire).
-*   **[215-316]**: Crystal Sphere minigame grid interaction.
+*   **[0-49]: `play_card`**: 10 card slots in hand, each with 5 potential enemy targets. If a card is non-targeted, it defaults to target 0.
+*   **[50-74]: `use_potion`**: 5 potion slots, each with 5 potential targets.
+*   **[75-79]: `discard_potion`**: Safely discarding potions from the 5 available slots.
+*   **[80]: `end_turn`**: The primary combat phase terminator.
+*   **[81-90]: `combat_select_card`**: Choosing specific cards during selection overlays (e.g., Exhausting from hand).
+*   **[91]: `combat_confirm_selection`**: Confirming choices in combat overlays.
+*   **[92-106]: `claim_reward`**: Collecting up to 15 different loot items (Gold, Potions, Relics) from the rewards screen.
+*   **[107-121]: `select_card_reward`**: Choosing 1 of 15 potential card rewards.
+*   **[122]: `skip_card_reward`**: Opting to keep the current deck size.
+*   **[123]: `proceed`**: The universal global transition button (Map to Room, Reward to Map).
+*   **[124-133]: `choose_event_option`**: Navigating narrative narrative events with up to 10 choices.
+*   **[134]: `advance_dialogue`**: Advancing text-heavy event screens.
+*   **[135-139]: `choose_rest_option`**: Selecting Rest, Smith, or specialized Campfire options.
+*   **[140-154]: `shop_purchase`**: Buying items from the Merchant's 15-slot inventory.
+*   **[155-159]: `choose_map_node`**: Navigating the branching paths of the Spire.
+*   **[160-184]: `select_card`**: A secondary 25-slot selection grid for non-combat card events (e.g., Transform, Upgrade, Remove).
+*   **[185]: `confirm_selection`**: Universal grid confirmation.
+*   **[186]: `cancel_selection`**: Grid cancellation (where allowed).
+*   **[187-191]: `select_bundle`**: Choosing between item sets or bundles.
+*   **[192-193]**: Bundle Confirm/Cancel.
+*   **[194-198]: `select_relic`**: Choosing between relic choices.
+*   **[199]**: Skip relic.
+*   **[200-204]: `claim_treasure_relic`**: Looting treasure chests.
+*   **[205-214]: `menu_select`**: Global menu navigation (Main Menu, Character Select, Embark).
+*   **[215-316]: Crystal Sphere Grid**: High-resolution 9x11 grid interaction for the new STS2 minigame.
+*   **[316]: crystal_sphere_proceed**: Minigame terminator.
 
 ### Synchronous Training Architecture (Stable Baselines3)
 This project utilizes **Stable Baselines3 (SB3)** to orchestrate the training loop using vectorized environments:
@@ -166,7 +185,8 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 * **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update.
 * **Hall of Fame:** If a high score is achieved during a rollout, the **updated brain** (containing the new learning) is saved to `hall_of_fame/` at the start of the next update iteration.
 * **Ultimate Best:** Reserved for **Phase Promotions**. When an agent successfully completes a Phase, its graduating brain is secured in the `ultimate_best/` directory for historical reference.
-* **Smart Entropy Defibrillator:** To prevent behavioral "ruts" in Act 1, the orchestrator implements a dynamic curiosity spike. If the agent fails to reach the Act 1 Boss for **5 consecutive exams**, the `ent_coef` is automatically increased (+0.02) to force exploration of new card synergies. Upon success, entropy slowly decays to stabilize the policy, and resets to baseline upon Act promotion. This physically prevents the agent from overfitting to a mediocre Act 1 strategy.
+* **Smart Entropy Defibrillator:** To prevent behavioral "ruts" in Act 1, the orchestrator implements a dynamic curiosity spike. If the agent fails to reach the Act 1 Boss for **10 consecutive exams** (~90k steps), the `ent_coef` is automatically increased (+0.02) to force exploration of new card synergies. Upon success, entropy slowly decays to stabilize the policy, and resets to baseline upon Act promotion. This physically prevents the agent from overfitting to a mediocre Act 1 strategy.
+* **Strike Persistence:** Stagnation strikes are recorded in `cluster_state.json`, ensuring the brain's "frustration" is preserved across curriculum transitions and cluster reboots.
 
 ### 📊 Persistent Data & Session Logging
 To guarantee 100% data integrity across cluster reboots, the project implements a **Fragment-and-Merge** logging architecture:
@@ -195,8 +215,13 @@ A highly specialized, multi-layered reward system was designed to balance short-
     * **Ratio < 30%:** Healing is vital (**2.0x**), Smithing is heavily penalized (**-2.0x**).
 * **HP Delta (Dynamic Strictness):** Dynamic rewards (**`+0.1`** per enemy HP damage dealt). Damage rewards are calculated using a **Unique Enemy Key** (ID + Position) to ensure 100% mathematical accuracy.
     * *Note: Class-specific passive bonuses (like Ironclad's Burning Blood) are naturally integrated into the HP Delta system, providing additional positive reinforcement for successful combat victories.*
-* **The Universal Bounty Matrix:** To prevent exponential point inflation across phases, bounties are flattened into a universal constant:
-    * *Universal Bounties:* **Floor (+10.0)**, Boss (+100.0), Elite (+30.0), Smith (+15.0 Base)
+* **The Universal Bounty Matrix:** To prevent exponential point inflation across acts, rewards are flattened into universal constants:
+    * *Standard Bounties:* **Floor (+10.0)**, **Boss Kill (+100.0)**, **Elite Kill (+30.0)**, **Smith (+15.0 Base)**.
+    * **Boss Sight Bounty (+50.0):** Immediate reward for reaching Floor 16, 33, or 51. Incentivizes reaching the end of an act as a primary victory.
+    * **Smart Card Removal (+15.0):** Granted only when a **Basic card** (rarity: Basic) is removed from the deck, encouraging pro-level deck thinning.
+    * **Elite Ambition (Pathing):** Grants **+5.0** for entering an elite room while healthy (>50% HP) and **-15.0** for entering while critical (<30% HP).
+    * **Early Foundation (+2.0):** Rewards adding any card during Act 1 (Floors 1-15) to ensure a strong starting deck.
+    * **Tactical Potion Utility (+2.0):** Rewards using a potion specifically in Elite or Boss encounters to prevent resource hoarding.
 
 **Design Rationale:**
 In early iterations, the agent suffered from "superstitious learning" or simply surviving without getting stronger. Implementing a strict Step Tax forces the agent to act efficiently. Scaling up the Bounty Matrix in later phases forces the agent to actively hunt Elites and prioritize Campfire Smithing.

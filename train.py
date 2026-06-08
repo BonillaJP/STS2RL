@@ -350,6 +350,8 @@ class PhaseManagerCallback(BaseCallback):
                     self.last_eval_step = state.get("last_eval_step", 0)
                     self.best_mean_reward = state.get("best_mean_reward", -1000.0)
                     self.current_ent_coef = state.get("current_ent_coef", 0.07)
+                    self.consecutive_failures = state.get("consecutive_failures", 0)
+                    self.total_strikes = state.get("total_strikes", 0)
             except: pass
 
     def save_state(self):
@@ -359,7 +361,9 @@ class PhaseManagerCallback(BaseCallback):
                     "phase_idx": int(self.phase_idx),
                     "last_eval_step": int(self.last_eval_step),
                     "best_mean_reward": float(self.best_mean_reward),
-                    "current_ent_coef": float(self.current_ent_coef)
+                    "current_ent_coef": float(self.current_ent_coef),
+                    "consecutive_failures": int(self.consecutive_failures),
+                    "total_strikes": int(self.total_strikes)
                 }, f)
         except: pass
 
@@ -368,12 +372,12 @@ class PhaseManagerCallback(BaseCallback):
         self.training_env.env_method("set_training_phase", self.phase_idx)
         self.eval_env.env_method("set_training_phase", self.phase_idx)
         
-        # Phase-specific Learning Rates
+        # Phase-specific Learning Rates: Higher for discovery, lower for fine-tuning.
         lr = {1: 1e-4, 2: 1e-4, 3: 1e-4, 4: 5e-5, 5: 5e-5}.get(self.phase_idx, 5e-5)
         self.model.learning_rate = lr
         
         if reset_entropy:
-            # Baseline curiosity for new acts
+            # Baseline curiosity for starting a new Act.
             self.current_ent_coef = 0.05
             
         self.model.ent_coef = self.current_ent_coef
@@ -385,6 +389,7 @@ class PhaseManagerCallback(BaseCallback):
         self.last_eval_step = (current_step // self.eval_freq_global) * self.eval_freq_global
         self.save_state()
         
+        # Periodic brain checkpoints
         model_path = os.path.join(CHECKPOINT_DIR, f"sts2_mid_run_step_{current_step}.zip")
         vec_path = model_path.replace(".zip", ".pkl")
         self.model.save(model_path)
@@ -392,7 +397,7 @@ class PhaseManagerCallback(BaseCallback):
         if norm_env: norm_env.save(vec_path)
         print(f"[CHECKPOINT] Updated Brain Secured at Step {current_step:,}")
         
-        # Purge old checkpoints
+        # Storage cleanup: maintain only the most recent checkpoints
         all_zips = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "sts2_mid_run_step_*.zip")), key=os.path.getmtime)
         while len(all_zips) > 3:
             oldest_zip = all_zips.pop(0)
@@ -436,7 +441,7 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Curriculum target thresholds
+        # Graduation Requirements
         promo_reward_targets = {1: 200.0, 2: 450.0, 3: 700.0, 4: 650.0, 5: 600.0, 6: 550.0}
         promo_floor_targets = {1: 16.0, 2: 33.0, 3: 50.0, 4: 51.0, 5: 51.0, 6: 51.0}
         exam_win_floors = {1: 16, 2: 33, 3: 50, 4: 51, 5: 51, 6: 51}
@@ -447,7 +452,7 @@ class PhaseManagerCallback(BaseCallback):
         print(f"\n[EXAM] Mean Reward: {mean_reward_final:.2f} | Mean Floor: {mean_floor:.1f}")
         print(f"[EXAM] Successes: {wins}/{self.n_eval_episodes} hit target Floor {target_win_floor}")
         
-        # Persistence of exam report
+        # Exam performance persistence
         latest_stats_path = os.path.join(LOG_DIR, f"latest_exam_stats_step_{current_step}.txt")
         with open(latest_stats_path, "w") as f:
             f.write(f"{'='*40}\n")
@@ -470,7 +475,41 @@ class PhaseManagerCallback(BaseCallback):
             try: os.remove(all_latest.pop(0))
             except: pass
 
-        # Archive Top-3 brains
+        # Detailed Best-of-all-time stats
+        best_bio_path = os.path.join(LOG_DIR, "best_model_details.json")
+        with open(best_bio_path, "w") as bio_f:
+            json.dump({
+                "global_step": int(current_step),
+                "phase": int(self.phase_idx),
+                "date": str(datetime.datetime.now()),
+                "mean_reward": float(mean_reward_final),
+                "best_reward": float(np.max(total_rewards)),
+                "worst_reward": float(np.min(total_rewards)),
+                "mean_floor": float(mean_floor),
+                "best_floor": int(best_floor),
+                "worst_floor": int(worst_floor),
+                "mean_length": float(mean_len),
+                "consistency_stddev": float(consistency),
+                "success_rate": f"{wins}/{self.n_eval_episodes}"
+            }, bio_f, indent=4)
+
+        # Progression History CSV
+        prog_log_path = os.path.join(LOG_DIR, "exam_progression_log.csv")
+        prog_data = {
+            "step": [current_step],
+            "phase": [self.phase_idx],
+            "mean_reward": [mean_reward_final],
+            "mean_floor": [mean_floor],
+            "success_rate": [wins / self.n_eval_episodes],
+            "timestamp": [str(datetime.datetime.now())]
+        }
+        df_new = pd.DataFrame(prog_data)
+        if not os.path.exists(prog_log_path):
+            df_new.to_csv(prog_log_path, index=False)
+        else:
+            df_new.to_csv(prog_log_path, mode='a', header=False, index=False)
+
+        # Gallery Management: maintain Top-3 best ever deterministic brains
         top_log_path = os.path.join(TOP_MODELS_DIR, "top_models_log.json")
         top_entries = []
         if os.path.exists(top_log_path):
@@ -516,6 +555,7 @@ class PhaseManagerCallback(BaseCallback):
                         f.write(f"Run {i+1}: Floor {f_val} | Reward {r:.1f}\n")
                     f.write(f"{'='*40}\n")
 
+                # Clear outdated models of the same rank
                 for f in glob.glob(os.path.join(TOP_MODELS_DIR, f"*_rank_{rank}_*")):
                     if entry["id"] not in f:
                         try: os.remove(f)
@@ -525,7 +565,7 @@ class PhaseManagerCallback(BaseCallback):
             self.best_mean_reward = mean_reward_final
             print(f"[EXAM] Phase Personal Best broken! New Target: {mean_reward_final:.2f}")
 
-        # Promotion / Stagnation / Demotion Control logic
+        # Curriculum Controls: Promotion / Defibrillation / Demotion
         if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= promo_floor_targets.get(self.phase_idx, 99):
             if self.phase_idx < 6:
                 print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
@@ -548,20 +588,20 @@ class PhaseManagerCallback(BaseCallback):
         else:
             if wins == 0:
                 self.consecutive_failures += 1
-                print(f"[STAGNATION] Strike {self.consecutive_failures}/5. Failed to hit doorstep (Floor {target_win_floor}).")
+                print(f"[STAGNATION] Strike {self.consecutive_failures}/10. Failed to hit doorstep (Floor {target_win_floor}).")
                 
-                # Smart Entropy Defibrillator: Spike curiosity if policy is stuck in Act 1
-                if self.consecutive_failures >= 5:
+                # Entropy Defibrillator: Increases ent_coef by +0.02 after 10 failed exams.
+                if self.consecutive_failures >= 10:
                     old_ent = self.current_ent_coef
                     self.current_ent_coef = min(0.15, self.current_ent_coef + 0.02)
                     self.consecutive_failures = 0
                     print(f"[DEFIBRILLATOR] Stagnation detected. Boosting Curiosity: {old_ent:.4f} -> {self.current_ent_coef:.4f}")
                     self._apply_phase(reset_entropy=False)
                 
-                # Step-Down Recovery: Drop 1 Phase if failed 10 times to re-learn foundation
+                # Step-Down: Drop exactly 1 Phase if failed 20 times.
                 total_strikes = getattr(self, 'total_strikes', 0) + 1
                 self.total_strikes = total_strikes
-                if total_strikes >= 10 and self.phase_idx > 1:
+                if total_strikes >= 20 and self.phase_idx > 1:
                     print(f"[DEMOTION] Policy collapse detected. Stepping down to Phase {self.phase_idx-1}...")
                     self.phase_idx -= 1
                     self.consecutive_failures = 0
@@ -569,13 +609,16 @@ class PhaseManagerCallback(BaseCallback):
                     self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 25.0 
                     self._apply_phase(reset_entropy=True)
             else:
-                # Progress confirmed: Slowly decay entropy to stabilize the winning policy
+                # Entropy Decay: Progress confirmed; reduce curiosity by 0.98x per cycle.
                 if self.current_ent_coef > 0.01:
                     self.current_ent_coef *= 0.98
                     print(f"[REFINEMENT] Progress confirmed. Decaying curiosity: {self.current_ent_coef:.4f}")
                     self._apply_phase(reset_entropy=False)
                 self.consecutive_failures = 0
                 self.total_strikes = 0
+        
+        self.save_state()
+        print(f"{'='*60}\n")
         
         self.save_state()
         print(f"{'='*60}\n")

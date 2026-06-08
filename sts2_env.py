@@ -97,6 +97,7 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_gold = -1
         self.last_prog_energy = -1
         self.last_prog_deck_size = -1
+        self.last_prog_basic_card_count = -1
         self.last_prog_enemy_block_sum = -1
         self.last_prog_player_block = -1
         self.last_prog_selected_cards = []
@@ -806,28 +807,61 @@ class SlayTheSpire2Env(gym.Env):
         hp_ratio = self.previous_hp / max_hp
         hp_delta = player_now.get("hp", 0) - self.previous_hp
 
+        # Card Removal: +15.0 for removing cards with 'Basic' rarity (Strikes/Defends).
+        current_basic_count = sum(1 for c in player_now.get("deck", []) if (c.get("rarity") or c.get("card_rarity")) == "Basic")
+        if current_basic_count < self.last_prog_basic_card_count and self.last_prog_basic_card_count > 0:
+            b_breakdown["bounty"] += 15.0
+        self.last_prog_basic_card_count = current_basic_count
+
+        # Potion Use: +2.0 for using a consumable during Elite or Boss encounters.
+        if payload.get("action") == "use_potion" and new_screen in ["elite", "boss"]:
+            b_breakdown["bounty"] += 2.0
+
         # Bounties
         if self.last_prog_screen == "elite" and new_screen == "rewards": self.pending_elite_bounty = True
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
         if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
 
+        # Elite Entry: +5.0 if HP > 50%, -15.0 if HP < 30%.
+        if new_screen == "elite" and self.last_prog_screen != "elite":
+            if hp_ratio > 0.5:
+                b_breakdown["bounty"] += 5.0
+            elif hp_ratio < 0.3:
+                b_breakdown["bounty"] -= 15.0
+
+        # End Turn Tracking: Used for combat stall penalties.
         if payload.get("action") == "end_turn":
             self.combat_turn_count += 1
-        if new_screen in ["monster", "elite", "boss"] and self.last_prog_screen not in ["monster", "elite", "boss"]: self.combat_turn_count = 0
+        if new_screen in ["monster", "elite", "boss"] and self.last_prog_screen not in ["monster", "elite", "boss"]: 
+            self.combat_turn_count = 0
 
-        b_breakdown["tax"] -= 0.01 
+        # Time/Efficiency Taxes
+        b_breakdown["tax"] -= 0.01 # Base action cost
         if self.combat_turn_count > 20: b_breakdown["tax"] -= (self.combat_turn_count - 20) * 0.1
         if self.stagnant_steps > 50: b_breakdown["tax"] -= 20.0
         elif self.stagnant_steps > 30: b_breakdown["tax"] -= 5.0
         elif self.stagnant_steps > 15: b_breakdown["tax"] -= 2.0
 
         if floor_now > self.previous_floor:
+            # Floor Milestone: Fixed +10 per floor climbed.
             b_breakdown["floor"] += 10.0
+            
+            # Boss Room: +50 for reaching floor 16, 33, or 51.
+            if floor_now in [16, 33, 51]:
+                b_breakdown["bounty"] += 50.0
+
+            # Completion Bounties: Triggered when exiting a room via the rewards screen.
             if self.pending_boss_bounty: b_breakdown["bounty"] += 100.0; self.pending_boss_bounty = False
             if self.pending_elite_bounty: b_breakdown["bounty"] += 30.0; self.pending_elite_bounty = False
             if self.pending_smith_bounty:
+                # Dynamic Smithing: Scales based on health. Higher HP = more reward for upgrading.
                 s_m = 1.5 if hp_ratio > 0.9 else 1.2 if hp_ratio > 0.8 else 1.0 if hp_ratio > 0.5 else 0.2 if hp_ratio > 0.3 else -2.0
                 b_breakdown["bounty"] += (15.0 * s_m); self.pending_smith_bounty = False
+            
+            # Drafting Incentive: +2.0 for adding cards during Act 1 (Floors 1-15).
+            if len(player_now.get("deck", [])) > self.last_prog_deck_size and floor_now < 16 and self.last_prog_deck_size > 0:
+                b_breakdown["bounty"] += 2.0
+            
             self.previous_floor = floor_now
             
         if hp_delta > 0:
@@ -917,4 +951,3 @@ class SlayTheSpire2Env(gym.Env):
         self.last_prog_energy, self.last_prog_player_block, self.last_prog_deck_size = -1, -1, -1
         self.pending_boss_bounty, self.pending_elite_bounty, self.pending_smith_bounty = False, False, False
         self.lowest_enemy_hp_seen = {}; return self._flatten_state(state), {}
-
