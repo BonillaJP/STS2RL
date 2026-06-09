@@ -892,7 +892,35 @@ class SlayTheSpire2Env(gym.Env):
         # Bounties
         if self.last_prog_screen == "elite" and new_screen == "rewards": self.pending_elite_bounty = True
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
-        if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
+        
+        # Accurate Rest Site Option Detection
+        last_choice_id = "none"
+        if payload.get("action") == "choose_rest_option":
+            idx = payload.get("index", 0)
+            rs_opts = self.current_state.get("rest_site", {}).get("options", [])
+            if idx < len(rs_opts):
+                last_choice_id = str(rs_opts[idx].get("id", "none")).lower()
+
+        # Catch all Smithing/Enchanting/Hatching screens (using API ID and Screen Type)
+        is_upgrade_screen = new_screen in ["card_select", "enchanting", "enchant", "upgrade_select"]
+        if is_upgrade_screen or last_choice_id in ["smith", "enchant", "hatch", "dig", "toke"]:
+            is_upgrade = (new_state.get("card_select", {}).get("screen_type") == "upgrade")
+            is_enchant = (new_screen in ["enchanting", "enchant", "upgrade_select"])
+            if is_upgrade or is_enchant or last_choice_id in ["smith", "enchant", "hatch", "dig", "toke"]:
+                self.pending_smith_bounty = True
+
+        # Universal Healing Efficiency Logic
+        if last_choice_id == "rest":
+            potential_heal = max_hp * 0.3
+            overflow = (self.previous_hp + potential_heal) - max_hp
+            if overflow <= 5:
+                # Clean Heal: Rewarded for perfect efficiency.
+                b_breakdown["bounty"] += 15.0
+            else:
+                # Wasteful Heal: Penalized for resource waste.
+                waste_penalty = min(15.0, (overflow / potential_heal) * 20.0)
+                b_breakdown["bounty"] -= waste_penalty
+                self._log_action(f"-> WASTEFUL HEAL: Overflew by {overflow:.1f} HP.")
 
         # Hardcore Elite Ambition: Penalizes entering an Elite fight with dangerously low HP.
         # Penalty is tapered: -5.0 in Phase 1, scaling to -15.0 in Phase 4+ to encourage early learning.
@@ -937,8 +965,19 @@ class SlayTheSpire2Env(gym.Env):
             if self.pending_boss_bounty: b_breakdown["bounty"] += 100.0; self.pending_boss_bounty = False
             if self.pending_elite_bounty: b_breakdown["bounty"] += 15.0; self.pending_elite_bounty = False
             if self.pending_smith_bounty:
-                # Dynamic Smithing: Scales based on health. Higher HP = more reward for upgrading.
-                s_m = 1.5 if hp_ratio > 0.9 else 1.2 if hp_ratio > 0.8 else 1.0 if hp_ratio > 0.5 else 0.2 if hp_ratio > 0.3 else -2.0
+                # Dynamic Smithing & Efficiency Calculation
+                # Higher reward if choosing to upgrade when a heal would have been wasteful.
+                potential_heal = max_hp * 0.3
+                would_overflow = (self.previous_hp + potential_heal) > (max_hp + 5)
+                
+                if would_overflow:
+                    # Smart Upgrade: Rewarded for correctly skipping a wasteful heal.
+                    s_m = 1.5 if hp_ratio > 0.8 else 1.2 if hp_ratio > 0.5 else 0.8
+                    b_breakdown["bounty"] += 20.0 # Extra incentive for efficiency
+                else:
+                    # Riskier Upgrade: Reward scales down or turns negative at critical HP.
+                    s_m = 1.0 if hp_ratio > 0.6 else 0.5 if hp_ratio > 0.4 else -1.0 if hp_ratio > 0.25 else -3.0
+                
                 b_breakdown["bounty"] += (15.0 * s_m); self.pending_smith_bounty = False
             
             # Drafting Incentive: +2.0 for adding cards during Act 1 (Floors 1-15).

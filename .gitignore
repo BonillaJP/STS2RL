@@ -4,6 +4,7 @@ models/
 checkpoints/
 tensorboard/
 _references/
+_future-plans/
 *.zip
 *.pt
 *.pth

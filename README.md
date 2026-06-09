@@ -192,7 +192,10 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 * **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update.
 * **Hall of Fame:** If a high score is achieved during a rollout, the **updated brain** (containing the new learning) is saved to `hall_of_fame/` at the start of the next update iteration.
 * **Ultimate Best:** Reserved for **Phase Promotions**. When an agent successfully completes a Phase, its graduating brain is secured in the `ultimate_best/` directory for historical reference.
-* **Smart Entropy Defibrillator:** To prevent behavioral "ruts", the orchestrator implements a dynamic curiosity spike. The initial `ent_coef` is calibrated to **0.10** for aggressive discovery. If the agent fails to reach the Act Boss for **5 consecutive exams**, the `ent_coef` is automatically increased (+0.05) up to a max of **0.25** to force exploration of new card synergies. Upon success, entropy decays (0.90x) to quickly stabilize the winning policy, and resets to baseline upon Act promotion.
+* **Smart Entropy Defibrillator:** To prevent behavioral "ruts", the orchestrator implements a dynamic curiosity spike. 
+    * **Phases 1-3 Baseline:** Strictly enforced at **0.10** to ensure maximum Act 1 discovery. The orchestrator "snaps" curiosity back to this baseline if it prematurely decays below 0.10 during early training, fixing a bug where exploration could collapse to 0.05.
+    * **Defibrillation:** If the agent fails to reach the Act Boss for **5 consecutive exams**, the `ent_coef` is automatically increased (+0.05) up to a max of **0.25** to force exploration of new card synergies. 
+    * **Refinement:** Upon success, entropy decays (0.90x) to quickly stabilize the winning policy, and resets to baseline upon Act promotion.
 
 * **Strike Persistence:** Stagnation strikes are recorded in `cluster_state.json`, ensuring the brain's "frustration" is preserved across curriculum transitions and cluster reboots.
 
@@ -217,12 +220,12 @@ A highly specialized, multi-layered reward system was designed to balance short-
 
 * **Indecision Tax (Masked Actions):** To prevent the agent from "stalling" by spamming invalid inputs, every masked action attempt results in a light **`-1.0` penalty**.
 * **Reward Telemetry:** Every action reward is logged in real-time within the `node_trace_{port}.jsonl` files, featuring a **Granular Breakdown** (e.g., `-> ACCEPTED. Net: +10.59 (Floor: +10.0, Dmg: +0.6, Tax: -0.01)`).
-* **Dynamic Survival Instinct (Campfires):** Healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**:
-    * **Ratio > 90%:** Healing is penalized (**-0.5x**), Smithing is boosted (**1.5x**).
-    * **Ratio 80-90%:** Healing is neutral (**0.0x**), Smithing is encouraged (**1.2x**).
-    * **Ratio 50-80%:** Standard operation (**0.5x** Heal, **1.0x** Smith).
-    * **Ratio 30-50%:** Healing is prioritized (**1.0x**), Smithing is discouraged (**0.2x**).
-    * **Ratio < 30%:** Healing is vital (**2.0x**), Smithing is heavily penalized (**-2.0x**).
+* **Dynamic Survival Instinct (Campfires):** Implements a "Universal Healing Efficiency" model. Choice detection is powered by direct API IDs (`rest`, `smith`, `hatch`, `enchant`, etc.), ensuring no STS2-specific upgrades bypass the risk logic:
+    *   **Clean Heal Bounty (+15.0):** Rewarded if the 30% HP gain fits efficiently within the Max HP bar (Overflow < 5 HP).
+    *   **Wasteful Heal Penalty:** If healing overflows Max HP, a penalty is applied (e.g., -5.0 to -15.0) to discourage resource waste.
+    *   **Smart Upgrade Bounty (+20.0):** Awarded if the agent correctly skips a wasteful heal in favor of Smithing/Enchanting/Hatching when at high HP.
+    *   **Reckless Skip Penalty:** Aggressively penalizes (-1.0 to -3.0 multiplier) skipping a "Clean Heal" when in the danger zone (< 30% HP) to ensure long-term survival.
+    *   **Confident Pathing:** Maintains a positive reward (+0.5 multiplier) for upgrading while at mid-HP (40-60%), allowing the model to leverage "pro-player confidence" if the deck is strong.
 * **HP Delta (Dynamic Strictness):** Dynamic rewards (**`+0.1`** per enemy HP damage dealt). Damage rewards are calculated using a **Unique Enemy Key** (ID + Position) to ensure 100% mathematical accuracy.
     * *Note: Class-specific passive bonuses (like Ironclad's Burning Blood) are naturally integrated into the HP Delta system, providing additional positive reinforcement for successful combat victories.*
 * **The Universal Bounty Matrix:** To prevent exponential point inflation across acts, rewards are flattened into universal constants:

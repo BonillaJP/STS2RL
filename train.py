@@ -339,7 +339,7 @@ class PhaseManagerCallback(BaseCallback):
         self.state_file = state_file or os.path.join(CHECKPOINT_DIR, "cluster_state.json")
         self.phase_idx, self.last_eval_step, self.best_mean_reward = 1, 0, -1000.0
         self.consecutive_failures = 0 
-        self.current_ent_coef = 0.05 # Initial exploration bias
+        self.current_ent_coef = 0.10 # Master Class baseline curiosity (Phases 1-3)
         self._load_state()
     def set_eval_freq(self, new_freq):
         self.eval_freq_global = new_freq
@@ -352,7 +352,7 @@ class PhaseManagerCallback(BaseCallback):
                     self.phase_idx = state.get("phase_idx", 1)
                     self.last_eval_step = state.get("last_eval_step", 0)
                     self.best_mean_reward = state.get("best_mean_reward", -1000.0)
-                    self.current_ent_coef = state.get("current_ent_coef", 0.07)
+                    self.current_ent_coef = state.get("current_ent_coef", 0.10)
                     self.consecutive_failures = state.get("consecutive_failures", 0)
                     self.total_strikes = state.get("total_strikes", 0)
             except: pass
@@ -379,8 +379,8 @@ class PhaseManagerCallback(BaseCallback):
         lr = {1: 1e-4, 2: 1e-4, 3: 1e-4, 4: 5e-5, 5: 5e-5}.get(self.phase_idx, 5e-5)
         self.model.learning_rate = lr
         
-        if reset_entropy:
-            # Baseline curiosity for starting a new Act.
+        if reset_entropy or (self.phase_idx <= 3 and self.current_ent_coef < 0.10):
+            # Baseline curiosity for starting a new Act or recovering Phase 1-3 baseline.
             self.current_ent_coef = 0.10
             
         self.model.ent_coef = self.current_ent_coef
