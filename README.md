@@ -34,7 +34,7 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
         * **Zero-Latency Restarts:** The `_ensure_fresh_run` loop utilizes a **Patient Iterative Architecture** with MD5 state hashing to navigate Game Over screens and main menus at 20Hz (50ms safety throttle), throwing the agent into the next run safely without causing engine thread collisions or stack overflows.
         * **Animation Cooldown Enforcement:** Applies a strict 5-step RL mask cooldown to rapid actions (like playing cards) to prevent the agent from spamming actions faster than the engine can process them.
         * **Smart Progress Tracking:** Only **Hard Progress** (changes in HP, Gold, Floor, or Deck Size) fully resets the stagnation counter. Selection history progress only grants a small buffer (up to **20 steps**) rather than a full reset, preventing the "flicker-loop" exploit where the agent toggles cards to avoid death penalties.
-            * **Compounding Step Tax:** Every action costs a base **-0.01**. If more than 20 steps are taken on a single screen without progress, the tax scales to **-0.10**. This ensures that stalling is always more expensive than the -50.0 death penalty.
+            * **Compounding Step Tax:** Every action costs a base **-0.05** (Master Class). If more than 20 steps are taken on a single screen without progress, the tax scales to **-0.20**. This ensures that stalling is always more expensive than the -50.0 death penalty.
             * **Absolute path-based Force-Kill:** The reboot logic performs an exhaustive path-based cleanup of the node's specific folder before relaunching to prevent duplicate game instances.
 
     * **Overlay-First Priority:** Selection overlays (Exhaust, Scry, Choose) are prioritized over combat actions, forcing the agent to resolve choices before fighting to prevent deadlocks.
@@ -111,8 +111,9 @@ Slay the Spire 2 is powered by the Godot engine, which generates detailed debug 
 **High-Stability Hierarchy (Zero-Intervention Recovery):**
 The environment features a five-layer **Self-Healing** system to handle engine crashes, lag spikes, and mod bugs autonomously:
 
-1.  **Patient API Handshake (Level 1):** Performs **100 micro-retries** (100ms intervals) to wait for the API port to wake up, allowing up to **10 seconds** for basic room transitions.
-2.  **60s Startup Safety (Level 2):** Provides a massive **60-second window** (1200 iterations) for the engine to reach the Main Menu during reboots, physically preventing the "Murder Loop" where the script kills the game while it is still preloading assets.
+1.  **Patient API Handshake (Level 1):** Performs **300 micro-retries** (100ms intervals) to wait for the API port to wake up, allowing up to **30 seconds** for heavy cluster initialization.
+2.  **60s Startup Safety (Level 2):** Provides a massive **60-second window** (1200 iterations) for the engine to reach the Main Menu during reboots, physically preventing the "Murder Loop."
+3.  **Physical Choice Verification:** Implements "Exit Gates" for all menu choices (Bundles, Shop, Relics). The environment refuses to return an observation until it physically verifies the game state has updated (e.g., Gold decreased, item removed, or screen cleared).
 3.  **Surgical Reboot Protocol (Level 3):** For standard failures (deadlocks or API stutters), the system identifies and kills **ONLY the specific frozen node** by its absolute process name (e.g., 'Node 1'). All other nodes continue training uninterrupted.
 4.  **Ghost Save Recovery (Level 4):** Automatically detects and clears cached "Continue" states by toggling profiles (e.g., 1 -> 2 -> 1) upon reboot. This forces the Godot engine to refresh its metadata and realize the run is gone.
 5.  **Full Cluster Purge (Level 5):** Triggered ONLY if `godot.log` exceeds 1GB. The system performs an exhaustive force-kill of Node 1, Node 2, Node 3, Node 4, and SlayTheSpire2 simultaneously to release shared file locks and autonomously delete the bloated log.
@@ -204,14 +205,16 @@ To guarantee 100% data integrity across cluster reboots, the project implements 
 ### The Reward System (Master Class Telemetry)
 A highly specialized, multi-layered reward system was designed to balance short-term survival with long-term scaling:
 
-* **Step Tax (`-0.01`):** A minimal flat penalty applied to every single action. This allows the agent to safely scale in long Ascension 8+ fights.
+* **Step Tax (`-0.05`):** A minimal flat penalty applied to every single action. This forces the agent to act efficiently and prioritize decisive combat.
+* **Transition Dopamine:** Any action that physically changes the game screen (Room to Room, Menu to Map) grants a small **+0.05 reward**, reinforcing decisiveness.
 * **Tapered Death Penalty (The "Slope of Courage"):** Replaces the flat penalty with a mathematical gradient for early Phases. Formula: `Penalty = -50.0 + (min(Floor / Phase_Target, 1.0) * 40.0)`. Dying early is heavily penalized (e.g., -47.5), but dying deep in an Act near the Boss is forgiven (e.g., -12.5), naturally pulling the agent deeper into the Spire without allowing suicide exploits.
 * **Combat Stall Penalty:** If a fight exceeds 20 turns, a compounding penalty (`-0.1` per extra turn) is applied. This prevents "infinite defense" loops and forces the agent to find efficient killing patterns.
-* **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps.
-    * **15+ steps:** `-2.0` penalty per action.
-    * **30+ steps:** `-5.0` penalty per action.
-    * **100+ steps:** `-20.0` penalty per action.
+* **Stagnation Tax Scaling:** To prevent behavioral "ruts" or infinite menu loops, the environment implements a compounding penalty based on consecutive stagnant steps:
+    * **10+ steps:** `-2.0` penalty per action.
+    * **20+ steps:** `-10.0` penalty per action.
+    * **50+ steps:** `-20.0` penalty per action.
     * **200+ steps:** **Autonomous Surgical Reboot.**
+
 * **Indecision Tax (Masked Actions):** To prevent the agent from "stalling" by spamming invalid inputs, every masked action attempt results in a light **`-1.0` penalty**.
 * **Reward Telemetry:** Every action reward is logged in real-time within the `node_trace_{port}.jsonl` files, featuring a **Granular Breakdown** (e.g., `-> ACCEPTED. Net: +10.59 (Floor: +10.0, Dmg: +0.6, Tax: -0.01)`).
 * **Dynamic Survival Instinct (Campfires):** Healing rewards and smithing bounties scale dynamically based on the agent's current **HP Ratio**:
@@ -231,7 +234,7 @@ A highly specialized, multi-layered reward system was designed to balance short-
     * **Tactical Potion Utility (+2.0):** Rewards using a potion specifically in Elite or Boss encounters to prevent resource hoarding.
 
 **Design Rationale:**
-In early iterations, the agent suffered from "superstitious learning" or simply surviving without getting stronger. Implementing a strict Step Tax forces the agent to act efficiently. Scaling up the Bounty Matrix in later phases forces the agent to actively hunt Elites and prioritize Campfire Smithing.
+The system is designed to prevent "superstitious learning" or simply surviving without getting stronger. Implementing a strict Step Tax forces the agent to act efficiently. Scaling up the Bounty Matrix in later phases forces the agent to actively hunt Elites and prioritize Campfire Smithing.
 
 **Reward Experimentation!**
 RL is highly sensitive to reward shaping. Experimentation is highly encouraged—alter these numbers in `sts2_env.py` to test new hypotheses, experiment with new topologies, or incentivize entirely different playstyles.
@@ -246,10 +249,15 @@ The curriculum is split into two distinct learning philosophies to prevent early
 
 * **Phase 1 (Act 1 - Floor 17):** Requires Wins >= 3/10.
 * **Phase 2 (Act 2 - Floor 33):** Requires Wins >= 3/10.
-* **Phase 3 (Act 3 - Floor 48):** Requires Wins >= 3/10.
-* **Phase 4 (Ascension 1-4):** Requires Mean Floor >= 48.0 AND Mean Reward >= 700.0.
-* **Phase 5 (Ascension 5-8):** Requires Mean Floor >= 48.0 AND Mean Reward >= 650.0.
-* **Phase 6 (Ascension 9-10):** Requires Mean Floor >= 48.0 AND Mean Reward >= 600.0.
+* **Phase 3 (Act 3 - Floor 48):** Requires Wins >= 3/10. **[POINT OF NO RETURN]**
+    * *Upon graduation, a locked archival brain `ultimate_best_phase_3_GRADUATE.zip` is created.*
+* **Phase 4 (Mastery Level 1):** Requires Mean Floor >= 48.0 AND Mean Reward >= **900.0**.
+* **Phase 5 (Mastery Level 2):** Requires Mean Floor >= 48.0 AND Mean Reward >= **1,000.0**.
+* **Phase 6 (Mastery Level 3):** Requires Mean Floor >= 48.0 AND Mean Reward >= **1,100.0**.
+
+**Hardcore Graduation Mandates:**
+1. **The Demotion Floor:** Once the agent reaches Phase 4, it is **physically locked** into the Mastery curriculum. It can never be demoted back to the Experience-First phases (1-3), forcing it to adapt to endgame tactical requirements.
+2. **Ascension 0 Mastery:** Since training occurs on Ascension 0, the reward targets are set to "Hardcore" levels (900-1100) to ensure the agent is battle-ready for the real-world deployment on higher Ascension difficulties.
 
 **Demotion (Step-Down Recovery):**
 If performance stalls and the policy collapses in Phase 2+, the system implements a recovery step-down. If the agent strikes out completely 20 times (20 failed exams), it drops down exactly 1 Phase.

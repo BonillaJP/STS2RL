@@ -444,8 +444,8 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Graduation Requirements
-        promo_reward_targets = {4: 700.0, 5: 650.0, 6: 600.0}
+        # Graduation Requirements: Hardcore Mastery Targets for Ascension 0 Readiness
+        promo_reward_targets = {4: 900.0, 5: 1000.0, 6: 1100.0}
         exam_win_floors = {1: 17, 2: 33, 3: 48, 4: 48, 5: 48, 6: 48}
         
         target_win_floor = exam_win_floors.get(self.phase_idx, 48)
@@ -581,7 +581,11 @@ class PhaseManagerCallback(BaseCallback):
             if self.phase_idx < 6:
                 print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
                 
-                ultimate_path = os.path.join(ULTIMATE_BEST_DIR, f"ultimate_best_phase_{self.phase_idx}.zip")
+                # Definitive Save for Phase 3 Graduation: Locked brain for archival safety
+                base_name = f"ultimate_best_phase_{self.phase_idx}"
+                if self.phase_idx == 3: base_name += "_GRADUATE"
+                
+                ultimate_path = os.path.join(ULTIMATE_BEST_DIR, f"{base_name}.zip")
                 ultimate_vec = ultimate_path.replace(".zip", ".pkl")
                 ultimate_report = ultimate_path.replace(".zip", "_stats.txt")
                 
@@ -610,9 +614,10 @@ class PhaseManagerCallback(BaseCallback):
                     self._apply_phase(reset_entropy=False)
                 
                 # Step-Down: Drop exactly 1 Phase if failed 20 times.
+                # HARDCORE MANDATE: No demotions allowed once Phase 4 (Mastery) is reached.
                 total_strikes = getattr(self, 'total_strikes', 0) + 1
                 self.total_strikes = total_strikes
-                if total_strikes >= 20 and self.phase_idx > 1:
+                if total_strikes >= 20 and self.phase_idx > 1 and self.phase_idx < 4:
                     print(f"[DEMOTION] Policy collapse detected. Stepping down to Phase {self.phase_idx-1}...")
                     self.phase_idx -= 1
                     self.consecutive_failures = 0
@@ -726,7 +731,7 @@ def main():
     """Master entry point for the training orchestrator."""
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
     
-    # Nuke old engine logs on startup to prevent initial disk choking
+    # Nuke engine logs on startup to prevent disk choking
     appdata = os.getenv('APPDATA')
     if appdata:
         game_logs_path = os.path.join(appdata, "SlayTheSpire2", "logs")

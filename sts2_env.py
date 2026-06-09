@@ -509,8 +509,8 @@ class SlayTheSpire2Env(gym.Env):
                 state = self._raw_state()
                 if not state:
                     consecutive_failures += 1
-                    # Level 1 Patience: 10s (100 * 0.1s) for API port wake-up
-                    if consecutive_failures >= 100:
+                    # Level 1 Patience: 30s (300 * 0.1s) for API port wake-up during heavy cluster loading
+                    if consecutive_failures >= 300:
                         self._reboot_game_client(reason="API Connection Lost")
                         break 
                     time.sleep(0.1); continue
@@ -817,14 +817,30 @@ class SlayTheSpire2Env(gym.Env):
             for _ in range(40): # Max 400ms synchronization window
                 if not new_state: break
                 
-                # Screen-Specific Exit: Wait specifically for the screen to clear after selection
+                # Screen-Specific Exit Gates: Ensure the game has physically processed the choice
                 st = new_state.get("state_type")
                 if payload.get("action") == "select_card_reward" and st != "card_reward": break
                 if payload.get("action") == "skip_card_reward" and st != "card_reward": break
-                if payload.get("action") == "claim_reward" and st == "rewards":
-                    # For rewards, check if the item list has physically changed (item removed)
-                    if len(new_state.get("rewards", {}).get("items", [])) != len(self.current_state.get("rewards", {}).get("items", [])): break
                 
+                # Bundle Gates: Ensure pack selection is registered and screen clears upon confirmation
+                if payload.get("action") == "select_bundle" and new_state.get("bundle_select", {}).get("can_confirm"): break
+                if payload.get("action") == "confirm_bundle_selection" and st != "bundle_select": break
+
+                # Reward Gates: Ensure items are physically removed from the list or screen transitions
+                if payload.get("action") == "claim_reward" and st == "rewards":
+                    if len(new_state.get("rewards", {}).get("items", [])) != len(self.current_state.get("rewards", {}).get("items", [])): break
+                if payload.get("action") == "claim_treasure_relic" and st == "treasure":
+                    if len(new_state.get("treasure", {}).get("relics", [])) != len(self.current_state.get("treasure", {}).get("relics", [])): break
+                if payload.get("action") in ["select_relic", "skip_relic_selection"] and st != "relic_select": break
+
+                # Shop Gate: Wait for Gold to decrease or item to disappear
+                if payload.get("action") == "shop_purchase" and st in ["shop", "fake_merchant"]:
+                    if new_state.get("player", {}).get("gold", 0) != self.current_state.get("player", {}).get("gold", 0): break
+
+                # Dialogue Gate: Ensure text advances
+                if payload.get("action") == "advance_dialogue" and st in ["event", "neow"]:
+                    if new_hash != old_state_hash: break
+
                 new_hash = hashlib.md5(json.dumps(new_state, sort_keys=True).encode()).hexdigest()
                 if new_hash != old_state_hash: break
                 time.sleep(0.01); new_state = self._raw_state()
@@ -878,12 +894,14 @@ class SlayTheSpire2Env(gym.Env):
         if self.last_prog_screen == "boss" and new_screen == "rewards": self.pending_boss_bounty = True
         if new_screen == "card_select" and new_state.get("card_select", {}).get("screen_type") == "upgrade": self.pending_smith_bounty = True
 
-        # Elite Entry: +5.0 if HP > 50%, -15.0 if HP < 30%.
+        # Hardcore Elite Ambition: Penalizes entering an Elite fight with dangerously low HP.
+        # Penalty is tapered: -5.0 in Phase 1, scaling to -15.0 in Phase 4+ to encourage early learning.
         if new_screen == "elite" and self.last_prog_screen != "elite":
             if hp_ratio > 0.5:
                 b_breakdown["bounty"] += 5.0
             elif hp_ratio < 0.3:
-                b_breakdown["bounty"] -= 15.0
+                e_penalty = -5.0 if self.training_phase <= 1 else -10.0 if self.training_phase == 2 else -15.0
+                b_breakdown["bounty"] += e_penalty
 
         # End Turn Tracking: Used for combat stall penalties.
         if payload.get("action") == "end_turn":
@@ -891,15 +909,22 @@ class SlayTheSpire2Env(gym.Env):
         if new_screen in ["monster", "elite", "boss"] and self.last_prog_screen not in ["monster", "elite", "boss"]: 
             self.combat_turn_count = 0
 
-        # Time/Efficiency Taxes
-        base_tax = 0.01
-        if self.stagnant_steps > 20: base_tax = 0.10
+        # Time/Efficiency Taxes: Forces the agent to prioritize speed and decisiveness.
+        # Master Class Step Tax: -0.05 per action
+        base_tax = 0.05
+        if self.stagnant_steps > 20: base_tax = 0.20
         b_breakdown["tax"] -= base_tax
 
+        # Screen Progress Bounty: Tiny dopamine hit (+0.05) for any action that physically changes the game screen.
+        if new_screen != self.last_prog_screen:
+            b_breakdown["tax"] += 0.05
+
         if self.combat_turn_count > 20: b_breakdown["tax"] -= (self.combat_turn_count - 20) * 0.1
+        
+        # Aggressive Stagnation Tax: Rapidly breaks menu loops.
         if self.stagnant_steps > 50: b_breakdown["tax"] -= 20.0
-        elif self.stagnant_steps > 30: b_breakdown["tax"] -= 5.0
-        elif self.stagnant_steps > 15: b_breakdown["tax"] -= 2.0
+        elif self.stagnant_steps > 20: b_breakdown["tax"] -= 10.0 # Heavy penalty for persistent loops
+        elif self.stagnant_steps > 10: b_breakdown["tax"] -= 2.0  # Early loop-break trigger
         if floor_now > self.previous_floor:
             # Floor Milestone: Fixed +10 per floor climbed.
             b_breakdown["floor"] += 10.0
