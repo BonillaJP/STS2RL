@@ -501,110 +501,120 @@ class SlayTheSpire2Env(gym.Env):
         return {}
 
     def _ensure_fresh_run(self):
-        consecutive_failures = 0
-        old_hash = ""
-        for i in range(200): # Maximum wait of 2 seconds for API responsiveness
-            state = self._raw_state()
-            if not state:
-                consecutive_failures += 1
-                if consecutive_failures >= 10:
-                    self._reboot_game_client(reason="API Connection Lost"); return self._ensure_fresh_run()
-                time.sleep(0.1); continue
+        # Patient Iterative Loop: Prevents RecursionError during long startup/loading screens
+        while True:
             consecutive_failures = 0
-            
-            new_hash = hashlib.md5(json.dumps(state, sort_keys=True).encode()).hexdigest()
-            if new_hash == old_hash and state.get("state_type") not in ["monster", "elite", "boss"]:
-                time.sleep(0.01); continue
-            
-            screen, menu = state.get("state_type", ""), state.get("menu_screen", "")
-            ACTIVE = ["monster", "elite", "boss", "map", "event", "rest_site", "rewards", "card_reward", "shop", "neow", "hand_select", "treasure", "card_select", "bundle_select", "relic_select", "fake_merchant", "crystal_sphere"]
-            if screen in ACTIVE: 
-                while state and state.get("state_type") in ["monster", "elite", "boss"] and state.get("battle", {}).get("is_play_phase") == False:
-                    time.sleep(0.05)
-                    state = self._raw_state()
-                    if not state: break
-                self.current_state = state; return
-            
-            old_hash = new_hash
-            
-            opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
-            if menu == "main":
-                target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
+            old_hash = ""
+            for i in range(1200): # Level 2 Startup Safety: 60-second window to reach Main Menu/Active screen
+                state = self._raw_state()
+                if not state:
+                    consecutive_failures += 1
+                    # Level 1 Patience: 10s (100 * 0.1s) for API port wake-up
+                    if consecutive_failures >= 100:
+                        self._reboot_game_client(reason="API Connection Lost")
+                        break 
+                    time.sleep(0.1); continue
+                consecutive_failures = 0
                 
-                # Forced Profile Refresh: Clears cached bugged saves by toggling between profiles
-                if getattr(self, 'full_purge_cleanup_pending', False):
-                    print(f"[PURGE] Performing multi-profile save nuke to restore cluster stability...")
-                    for p_id in [1, 2, 3]:
-                        try:
-                            profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
-                            # Switch to profile, delete its save, switch away, switch back
-                            self._get_session().post(profile_url, json={"action": "switch", "profile_id": p_id}, timeout=5.0)
-                            time.sleep(1.0)
-                            self._nuke_current_run_save(target_id=p_id)
-                            # Metadata Refresh: toggle to an alt and back
-                            alt_p = 2 if p_id == 1 else 1
-                            self._get_session().post(profile_url, json={"action": "switch", "profile_id": alt_p}, timeout=5.0)
-                            time.sleep(1.0)
-                            self._get_session().post(profile_url, json={"action": "switch", "profile_id": p_id}, timeout=5.0)
-                        except: pass
+                new_hash = hashlib.md5(json.dumps(state, sort_keys=True).encode()).hexdigest()
+                # Rapid Polling: Skip heavy logic if state hasn't changed, unless in combat
+                if new_hash == old_hash and state.get("state_type") not in ["monster", "elite", "boss"]:
+                    time.sleep(0.01); continue
+                
+                screen, menu = state.get("state_type", ""), state.get("menu_screen", "")
+                ACTIVE = ["monster", "elite", "boss", "map", "event", "rest_site", "rewards", "card_reward", "shop", "neow", "hand_select", "treasure", "card_select", "bundle_select", "relic_select", "fake_merchant", "crystal_sphere"]
+                
+                # Success Gate: Exit loop if we've reached a playable screen
+                if screen in ACTIVE: 
+                    while state and state.get("state_type") in ["monster", "elite", "boss"] and state.get("battle", {}).get("is_play_phase") == False:
+                        time.sleep(0.05)
+                        state = self._raw_state()
+                        if not state: break
+                    self.current_state = state; return # Exit iterative loop upon success
+                
+                old_hash = new_hash
+                
+                opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
+                if menu == "main":
+                    target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
                     
-                    self.full_purge_cleanup_pending = False
-                    # Restore designated profile for this specific node
-                    self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
-                    continue
-
-                if getattr(self, 'ghost_save_cleanup_pending', False):
-                    # Step 1: Surgically delete run files while at the menu
-                    self._nuke_current_run_save()
-                    
-                    alt_profile = 2 if target_profile == 1 else 1
-                    profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
-                    try:
-                        print(f"[CLEANUP] Refreshing profile {target_profile} (Switching {target_profile} -> {alt_profile} -> {target_profile}) to clear ghost saves...")
-                        # Step 2: Toggle to alternate profile
-                        self._get_session().post(profile_url, json={"action": "switch", "profile_id": alt_profile}, timeout=5.0)
-                        time.sleep(1.0)
-                        # Step 3: Toggle back to original profile to force metadata refresh
+                    # Forced Profile Refresh: Clears cached bugged saves by toggling between profiles
+                    if getattr(self, 'full_purge_cleanup_pending', False):
+                        print(f"[PURGE] Performing multi-profile save nuke to restore cluster stability...")
+                        for p_id in [1, 2, 3]:
+                            try:
+                                profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
+                                # Switch to profile, delete its save, switch away, switch back
+                                self._get_session().post(profile_url, json={"action": "switch", "profile_id": p_id}, timeout=5.0)
+                                time.sleep(1.0)
+                                self._nuke_current_run_save(target_id=p_id)
+                                # Metadata Refresh: toggle to an alt and back
+                                alt_p = 2 if p_id == 1 else 1
+                                self._get_session().post(profile_url, json={"action": "switch", "profile_id": alt_p}, timeout=5.0)
+                                time.sleep(1.0)
+                                self._get_session().post(profile_url, json={"action": "switch", "profile_id": p_id}, timeout=5.0)
+                            except: pass
+                        
+                        self.full_purge_cleanup_pending = False
+                        # Restore designated profile for this specific node
                         self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
-                        time.sleep(1.0)
-                        self.ghost_save_cleanup_pending = False
-                        continue 
+                        continue
+
+                    if getattr(self, 'ghost_save_cleanup_pending', False):
+                        # Step 1: Surgically delete run files while at the menu
+                        self._nuke_current_run_save()
+                        
+                        alt_profile = 2 if target_profile == 1 else 1
+                        profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
+                        try:
+                            print(f"[CLEANUP] Refreshing profile {target_profile} (Switching {target_profile} -> {alt_profile} -> {target_profile}) to clear ghost saves...")
+                            # Step 2: Toggle to alternate profile
+                            self._get_session().post(profile_url, json={"action": "switch", "profile_id": alt_profile}, timeout=5.0)
+                            time.sleep(1.0)
+                            # Step 3: Toggle back to original profile to force metadata refresh
+                            self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
+                            time.sleep(1.0)
+                            self.ghost_save_cleanup_pending = False
+                            continue 
+                        except: pass
+
+                    # Ensure node is always on its designated profile
+                    try:
+                        profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
+                        resp = self._get_session().get(profile_url, timeout=5.0).json()
+                        if resp.get("current_profile_id") != target_profile:
+                            self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
+                            self._post({"action": "proceed"}); continue
                     except: pass
 
-                # Ensure node is always on its designated profile
-                try:
+                    # Start or continue the run
+                    if "continue" in opts: self._post({"action": "menu_select", "option": "continue"})
+                    elif "singleplayer" in opts: self._post({"action": "menu_select", "option": "singleplayer"})
+                    else: self._post({"action": "menu_select", "option": "main_menu"})
+                elif screen == "game_over": self._post({"action": "menu_select", "option": "main_menu"})
+                elif menu == "singleplayer": self._post({"action": "menu_select", "option": "standard"})
+                elif menu == "character_select":
+                    if "ironclad" in opts: self._post({"action": "menu_select", "option": "ironclad"})
+                    self._post({"action": "menu_select", "option": "embark"})
+                elif menu in ["profiles", "profile_select", "profile"]:
+                    target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
                     profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
-                    resp = self._get_session().get(profile_url, timeout=5.0).json()
-                    if resp.get("current_profile_id") != target_profile:
-                        self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
-                        self._post({"action": "proceed"}); continue
-                except: pass
-
-                # Start or continue the run
-                if "continue" in opts: self._post({"action": "menu_select", "option": "continue"})
-                elif "singleplayer" in opts: self._post({"action": "menu_select", "option": "singleplayer"})
-                else: self._post({"action": "menu_select", "option": "main_menu"})
-            elif screen == "game_over": self._post({"action": "menu_select", "option": "main_menu"})
-            elif menu == "singleplayer": self._post({"action": "menu_select", "option": "standard"})
-            elif menu == "character_select":
-                if "ironclad" in opts: self._post({"action": "menu_select", "option": "ironclad"})
-                self._post({"action": "menu_select", "option": "embark"})
-            elif menu in ["profiles", "profile_select", "profile"]:
-                target_profile = {15526: 1, 15527: 2, 15528: 3, 15529: 1}.get(self.port, 1)
-                profile_url = f"http://127.0.0.1:{self.port}/api/v1/profiles"
-                try: self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
-                except: pass
-                self._post({"action": "proceed"})
-            elif menu == "popup":
-                if "confirm" in opts: self._post({"action": "menu_select", "option": "confirm"})
-                elif "yes" in opts: self._post({"action": "menu_select", "option": "yes"})
-                elif "ignore" in opts: self._post({"action": "menu_select", "option": "ignore"})
+                    try: self._get_session().post(profile_url, json={"action": "switch", "profile_id": target_profile}, timeout=5.0)
+                    except: pass
+                    self._post({"action": "proceed"})
+                elif menu == "popup":
+                    if "confirm" in opts: self._post({"action": "menu_select", "option": "confirm"})
+                    elif "yes" in opts: self._post({"action": "menu_select", "option": "yes"})
+                    elif "ignore" in opts: self._post({"action": "menu_select", "option": "ignore"})
+                    else: self._post({"action": "proceed"})
+                elif screen == "neow": self._post({"action": "choose_event_option", "index": 0})
                 else: self._post({"action": "proceed"})
-            elif screen == "neow": self._post({"action": "choose_event_option", "index": 0})
-            else: self._post({"action": "proceed"})
-            
-            time.sleep(0.05)
-        self._reboot_game_client(reason="API Startup Timeout"); return self._ensure_fresh_run()
+                
+                time.sleep(0.05)
+            else: # If inner loop finishes without finding an active screen, trigger reboot
+                self._reboot_game_client(reason="API Startup Timeout")
+                continue # Restart iterative loop
+            continue # Reached via 'break' (reboot already triggered), restart iterative loop
 
     def _flatten_state(self, state):
         obs = np.zeros(1536, dtype=np.float32)
@@ -804,8 +814,17 @@ class SlayTheSpire2Env(gym.Env):
                 time.sleep(0.05); new_state = self._raw_state()
         elif payload.get("action") in ["select_card", "combat_select_card", "select_card_reward", "claim_reward", "end_turn", "confirm_selection", "combat_confirm_selection", "cancel_selection", "skip_card_reward", "skip_relic_selection", "claim_treasure_relic", "select_bundle", "confirm_bundle_selection", "select_relic", "shop_purchase", "choose_event_option", "advance_dialogue", "choose_rest_option", "menu_select"]:
             new_state = self._raw_state()
-            for _ in range(30): # Max 300ms
+            for _ in range(40): # Max 400ms synchronization window
                 if not new_state: break
+                
+                # Screen-Specific Exit: Wait specifically for the screen to clear after selection
+                st = new_state.get("state_type")
+                if payload.get("action") == "select_card_reward" and st != "card_reward": break
+                if payload.get("action") == "skip_card_reward" and st != "card_reward": break
+                if payload.get("action") == "claim_reward" and st == "rewards":
+                    # For rewards, check if the item list has physically changed (item removed)
+                    if len(new_state.get("rewards", {}).get("items", [])) != len(self.current_state.get("rewards", {}).get("items", [])): break
+                
                 new_hash = hashlib.md5(json.dumps(new_state, sort_keys=True).encode()).hexdigest()
                 if new_hash != old_state_hash: break
                 time.sleep(0.01); new_state = self._raw_state()

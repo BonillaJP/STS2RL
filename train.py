@@ -74,7 +74,9 @@ TRAIN_PORTS = [15526, 15527, 15528]
 # Port for the deterministic evaluation node
 EVAL_PORT = 15529
 
-# Training Curriculum Stages: (Batch Size, Steps per Update, Max Steps)
+# Training Curriculum Stages: (Batch Size, n_steps per Node, Max Steps)
+# Stage 1: Fast initial learning with smaller buffer for quick policy shaping.
+# Stage 2: Deep stabilization with large 3072 buffer for high-ascension mastery.
 BUFFER_STAGES = [
     (1024, 256, 18_432), 
     (3072, 512, 100_000_000)
@@ -82,7 +84,9 @@ BUFFER_STAGES = [
 
 PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 
-# SynergyCNNExtractor: 1D-Convolutional branch to 'scan' card hands for combos
+# SynergyCNNExtractor: 1D-Convolutional vision to 'scan' card hands for combos
+# This branch allows the model to detect spatial relationships between cards,
+# such as a high-damage card sitting next to an energy-generating card.
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
         super().__init__(observation_space, features_dim=1152)
