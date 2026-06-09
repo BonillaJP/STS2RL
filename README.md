@@ -14,7 +14,9 @@ An advanced Reinforcement Learning (RL) agent designed to play **Slay the Spire 
 
 ## 🚀 Key Features
 
-* **Synergy-CNN Vision:** The agent processes its hand using a 1D-Convolutional branch, allowing it to "scan" for card combos rather than just reading raw scalar numbers.
+* **Grandmaster Triple-Eye Vision:** The agent processes its Hand, Draw Pile (top 10), and Discard Pile (top 10) using dedicated 1D-Convolutional branches. This allows it to "scan" for card combos and strategic deck cycles with 100% precision.
+* **Combat Intelligence CNN:** A specialized CNN branch scans up to 5 enemies in the room, tracking their IDs, Intents, and 10 detailed statuses (Strength, Ritual, Artifact, etc.). This enables the agent to recognize AOE opportunities and "Patient Power" windows.
+* **Semantic Card Vision:** Each card is encoded with high-fidelity "Weapon Sensors" that detect AOE (target_type), Multi-Hit ("times"), and Scaling (Strength/Dex/Focus) capabilities, allowing for proactive strategic planning.
 * **State-First Architecture:** Ensures perfect synchronization between the game's internal state and the agent's logic. The environment performs a **Fresh API Fetch** at the start of every Step cycle and utilizes a high-performance cache for masking, preventing desyncs without sacrificing training throughput (FPS).
 * **Dynamic Action Masking:** Implements rigorous action masking (exactly 317 discrete actions) with a **Smart Commitment Gate** selection system.
     * **Action-use cap:** Automatically masks any action used more than **20 times** on the same screen to prevent policy loops and deadlocks.
@@ -127,20 +129,23 @@ The environment features a five-layer **Self-Healing** system to handle engine c
 
 ## ⚙️ Technical Deep Dive
 
-### 1. The State Observation Vector (1536 Floats)
+### 1. The State Observation Vector (2560 Floats)
 The environment translates the raw JSON game state into a massive, flattened observation vector to feed into the neural network. This allows the model to "see" every aspect of the game state simultaneously:
-* **Observation Space:** `spaces.Box(low=-1.0, high=1.0, shape=(1536,), dtype=np.float32)`
+* **Observation Space:** `spaces.Box(low=-1.0, high=1.0, shape=(2560,), dtype=np.float32)`
     * **[0-10]: Core Meta State:** Tracks the absolute fundamentals: Current Floor, HP Ratio, Max HP scaling, Gold, Act number, and Ascension level.
     * **[10-20]: Pile Metadata:** Dedicated indices for the size of the Draw, Discard, and Exhaust piles.
-    * **[20-50]: Player Status Effects:** Comprehensive parsing for 15+ status effects including Strength, Dexterity, Vulnerable, Weak, Artifact, and specialized STS2 buffs like soul's power.
-    * **[55-70]: Orb States:** Dynamic mapping for channeled orbs (identity and count), supporting the Defect's unique mechanical scaling.
-    * **[70-120]: Potion Bar:** High-resolution mapping for 5 potion slots, including unique ID hashes and usable/unusable boolean flags.
-    * **[120-320]: Enemy Vision:** Detailed data for up to 5 enemies simultaneously. For each entity, the network sees: Unique ID Hash, HP Ratio, Block sum, and Intent Damage (including multi-hit labels).
-    * **[320-620]: Hand & Card Vision (CNN Input):** The primary intelligence block. Maps the 10 leftmost cards in hand across 30 points each:
-        * Identity Hash, Energy Cost, Upgrade Status (+), and Keyword Scans (Block, Damage, Exhaust, Strength, Enchantments).
-    * **[620-870]: Dynamic Screen Logic:** Indices that change based on context. Tracks Shop item costs, Reward item types, and Relic choice indices during selection events.
-    * **[870-1370]: Full Map Vision:** A massive mapping of 50 navigation nodes. Each node includes its coordinate (Col/Row) and Room Type (Elite, Merchant, Rest, etc.).
-    * **[1370-1536]: Specialized States:** Support for the Crystal Sphere 9x11 grid (indices 1370-1469), Summoned Pets (1469-1511), and Event-specific choice flags (1511-1536).
+    * **[20-50]: Player Status Effects:** Comprehensive parsing for 15+ status effects including Strength, Dexterity, Vulnerable, Weak, Artifact, and specialized STS2 buffs.
+    * **[55-70]: Orb States:** Dynamic mapping for channeled orbs (identity and count).
+    * **[70-120]: Potion Bar:** High-resolution mapping for 5 potion slots, including unique ID hashes and usable boolean flags.
+    * **[120-320]: Enemy Intelligence CNN:** Detailed data for up to 5 enemies simultaneously. For each entity, the network sees: Unique ID Hash, HP Ratio, Block sum, Intent Damage (with multi-hit support), and 10 statuses per enemy.
+    * **[320-1220]: Triple-Eye Deck Vision:** The primary intelligence block. Maps the 10 leftmost cards in Hand [320-620], Draw Pile [620-920], and Discard Pile [920-1220] across 30 semantic points each:
+        * Identity Hash, Energy Cost, Upgrade Status (+), and Keyword Scans (AOE, Multi-Hit, Scaling, Block, Damage, Exhaust, Enchantments).
+    * **[1220-1370]: Relic Vision:** Maps 30 relics with unique ID hashes and internal counters.
+    * **[1370-1536]: Environment Intelligence:** Tracking Shop item costs, Reward item types, and Relic choice indices.
+    * **[1536-1700]: Exhaust Radar:** Summary densities of exhausted card types.
+    * **[1700-1800]: Crystal Sphere Grid:** High-resolution 9x11 spatial mapping for the STS2 minigame.
+    * **[1800-2000]: Summoned Pets & Minions:** Detailed scanning for combat companions.
+    * **[2000-2560]: Spire Navigation Intelligence:** A massive mapping of 50 Spire navigation nodes. Each node includes its coordinate (Col/Row) and Room Type (Elite, Merchant, Rest, etc.).
 
 ### 2. The Action Space (317 Discrete Actions)
 A fully flattened discrete space representing exactly 317 possible interactions, categorized as:
@@ -159,17 +164,17 @@ A fully flattened discrete space representing exactly 317 possible interactions,
 *   **[135-139]: `choose_rest_option`**: Selecting Rest, Smith, or specialized Campfire options.
 *   **[140-154]: `shop_purchase`**: Buying items from the Merchant's 15-slot inventory.
 *   **[155-159]: `choose_map_node`**: Navigating the branching paths of the Spire.
-*   **[160-184]: `select_card`**: A secondary 25-slot selection grid for non-combat card events (e.g., Transform, Upgrade, Remove).
-*   **[185]: `confirm_selection`**: Universal grid confirmation.
-*   **[186]: `cancel_selection`**: Grid cancellation (where allowed).
-*   **[187-191]: `select_bundle`**: Choosing between item sets or bundles.
-*   **[192-193]**: Bundle Confirm/Cancel.
-*   **[194-198]: `select_relic`**: Choosing between relic choices.
-*   **[199]**: Skip relic.
-*   **[200-204]: `claim_treasure_relic`**: Looting treasure chests.
-*   **[205-214]: `menu_select`**: Global menu navigation (Main Menu, Character Select, Embark).
-*   **[215-316]: Crystal Sphere Grid**: High-resolution 9x11 grid interaction for the new STS2 minigame.
-*   **[316]: crystal_sphere_proceed**: Minigame terminator.
+*   **[160-209]: `select_card`**: A secondary 50-slot selection grid for non-combat card events (e.g., Transform, Upgrade, Remove).
+*   **[210]: `confirm_selection`**: Universal grid confirmation.
+*   **[211]: `cancel_selection`**: Grid cancellation (where allowed).
+*   **[212-216]: `select_bundle`**: Choosing between item sets or bundles.
+*   **[217-218]**: Bundle Confirm/Cancel.
+*   **[219-223]: `select_relic`**: Choosing between relic choices.
+*   **[224]**: Skip relic.
+*   **[225-229]: `claim_treasure_relic`**: Looting treasure chests.
+*   **[230-239]: `menu_select`**: Global menu navigation (Main Menu, Character Select, Embark).
+*   **[240-340]: Crystal Sphere Grid**: High-resolution 9x11 grid interaction for the new STS2 minigame.
+*   **[341]: crystal_sphere_proceed**: Minigame terminator.
 
 ### Synchronous Training Architecture (Stable Baselines3)
 This project utilizes **Stable Baselines3 (SB3)** to orchestrate the training loop using vectorized environments:
@@ -188,7 +193,7 @@ The agent relies on a specialized neural network architecture tailored for Slay 
 ### PPO Brain Hyperparameters
 * **Unrestricted Model Loader:** The training script performs an exhaustive recursive search across all sub-directories and automatically resumes from the absolute newest `.zip` file based on disk timestamp.
 * **Intelligent Stage Selection (Zip-Peeking):** Upon resuming, the orchestrator "peeks" inside the model zip to identify the current internal step count and automatically selects the correct Stage parameters.
-* **Rollout Buffer (Main Phase):** The main training stage uses `n_steps=3072` per node. With 3 training nodes, this results in exactly **9,216 steps** in the buffer before every neural weight update.
+* **Rollout Buffer (Main Phase):** The main training stage uses `n_steps=4096` per node. With 3 training nodes, this results in exactly **12,288 steps** in the buffer before every neural weight update.
 * **Checkpoints:** The model is saved to the `checkpoints/` directory immediately after every brain update.
 * **Hall of Fame:** If a high score is achieved during a rollout, the **updated brain** (containing the new learning) is saved to `hall_of_fame/` at the start of the next update iteration.
 * **Ultimate Best:** Reserved for **Phase Promotions**. When an agent successfully completes a Phase, its graduating brain is secured in the `ultimate_best/` directory for historical reference.
@@ -314,21 +319,22 @@ The project includes built-in diagnostic tools to monitor cluster health, timing
 
 ## 🛠️ Developer Tuning Guide
 
-To modify the core behavior of the agent or optimize for different hardware, refer to these critical variables:
+To modify the core behavior of the agent or optimize for different hardware, refer to the **`GLOBAL_CONFIG`** block at the top of **`sts2_env.py`**.
 
-### 1. Training Dynamics (`train.py`)
+### 1. Global Modifiers (`sts2_env.py`)
+*   **`BASE_PATH_TEMPLATE`**: The centralized path to your STS2 node folders.
+*   **`STABILITY_THROTTLE`**: Controls the input delay (default 0.05s). Increase this if the game crashes during heavy animations.
+*   **`STEP_TAX`**: Base penalty per action. Adjust this to make the agent more or less "impatient."
+*   **`BOUNTIES`**: Fine-tune the rewards for Floor climbs, Boss kills, Elites, and Smithing.
+
+### 2. Training Dynamics (`train.py`)
 *   **`BUFFER_STAGES`**: A curriculum list where each entry is `(Batch Size, Steps per Update, Max Step)`. 
     *   *Tip:* If your GPU memory is low, decrease the **Batch Size** (e.g., 3072 -> 1024).
-*   **`ent_coef`**: Controls the entropy coefficient (exploration). 
-    *   *Tip:* Set this to **0.10** for early training (Phase 1-3). The **Smart Entropy Defibrillator** will automatically boost this if the agent becomes stuck in a tactical rut in Act 1.
-*   **`learning_rate`**: Fixed at **1e-4** for early acts. If the agent's policy collapses (High `approx_kl`), lower this to **5e-5**.
+*   **`ent_coef`**: Initial exploration factor. The **Smart Entropy Defibrillator** in `PhaseManagerCallback` will automatically scale this if progress stalls.
+*   **`learning_rate`**: Standard training rate. If the policy collapses (High `approx_kl`), lower this value in `PhaseManagerCallback._apply_phase`.
 
-### 2. Environment Stability (`sts2_env.py`)
-*   **`time.sleep(0.05)`**: The **Stability Throttle**. 
-    *   *Tip:* If the Godot engine crashes during heavy enemy animations, increase this to **0.1s**. If your PC is high-end, you can try lowering it to **0.01s** for extreme SPS.
-* **Deadlock Threshold:** If the agent is training on high Ascension levels where combat lasts longer, the `stagnant_steps` threshold (default 100) may be increased to prevent premature reboots.
-*   **`rejection_penalty`**: Currently set to **-1.0**. 
+### 3. Masking & Logic
+*   **`rejection_penalty`**: Currently set to **-1.0** in `GLOBAL_CONFIG`. 
     *   *Tip:* If the agent is "lazily" spamming end-turn to avoid fighting, increase this penalty to **-5.0** to force better mask adherence.
 
-o force better mask adherence.
 

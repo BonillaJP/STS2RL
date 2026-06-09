@@ -75,22 +75,35 @@ TRAIN_PORTS = [15526, 15527, 15528]
 EVAL_PORT = 15529
 
 # Training Curriculum Stages: (Batch Size, n_steps per Node, Max Steps)
-# Stage 1: Fast initial learning with smaller buffer for quick policy shaping.
-# Stage 2: Deep stabilization with large 3072 buffer for high-ascension mastery.
+# The Grandmaster Curriculum uses high-saturation buffers to maximize strategic learning.
+# Stage 1 (Warmup): 1024 steps * 3 nodes = 3072 total buffer. (8 updates over 24,576 steps).
+# Stage 2 (Mastery): 4096 steps * 3 nodes = 12,288 total buffer. (Master Cycle).
+# Batch Alignment: 3072 batch size fits perfectly into both buffer stages.
 BUFFER_STAGES = [
-    (1024, 256, 18_432), 
-    (3072, 512, 100_000_000)
+    (3072, 1024, 24_576), 
+    (3072, 4096, 100_000_000)
 ]
 
 PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 
-# SynergyCNNExtractor: 1D-Convolutional vision to 'scan' card hands for combos
-# This branch allows the model to detect spatial relationships between cards,
-# such as a high-damage card sitting next to an energy-generating card.
+# SynergyCNNExtractor: 4-branch 1D-Convolutional framework for total combat awareness.
+# This extractor processes Enemies, Hand, Draw Pile, and Discard Pile in parallel.
+# It enables the model to detect spatial synergies and strategic windows (AOE, Patient Power).
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
-        super().__init__(observation_space, features_dim=1152)
+        # features_dim=2048 provides a wide bottleneck for the [1024, 1024, 512] policy network.
+        super().__init__(observation_space, features_dim=2048)
         
+        # Combat Intelligence Branch: Processes 5 enemies with 40 features each.
+        self.enemy_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=40, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+
+        # Triple-Eye Deck Branches: Hand, Draw, and Discard piles (10 cards each).
         self.hand_cnn = nn.Sequential(
             nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -98,31 +111,61 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
             nn.ReLU(),
             nn.Flatten()
         )
-        
-        self.relic_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=5, out_channels=32, kernel_size=3, padding=1),
+
+        self.draw_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+
+        self.discard_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten()
         )
         
-        self.meta_processor = nn.Sequential(nn.Linear(1136, 512), nn.ReLU())
+        # Metadata Processor: Handles character stats, relics, map, and specialized states.
+        # Total non-CNN floats: 120 (Meta) + 150 (Relics) + 166 (Env) + 164 (Exhaust) + 100 (Sphere) + 200 (Pets) + 560 (Map) = 1460
+        self.meta_processor = nn.Sequential(nn.Linear(1460, 512), nn.ReLU())
         
-        self.final_dense = nn.Sequential(nn.Linear(1280 + 640 + 512, 1152), nn.ReLU())
+        # Final Integration Layer: Merges all 5 intelligence branches into the 2048-dim feature vector.
+        # CNN Out: (128*5) + (128*10) + (128*10) + (128*10) = 640 + 1280 + 1280 + 1280 = 4480
+        # Wait, Flatten() of Conv1d(Batch, 128, 5) is 640. Flatten of Conv1d(Batch, 128, 10) is 1280.
+        self.final_dense = nn.Sequential(nn.Linear(640 + 1280 + 1280 + 1280 + 512, 2048), nn.ReLU())
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
-        # Split vector into Meta [0-320], Hand [320-620], Meta [620-770], Relics [770-870], Meta [870+]
-        meta_1 = observations[:, :320]
-        hand_flat = observations[:, 320:620]
-        meta_2 = observations[:, 620:770]
-        relic_flat = observations[:, 770:870]
-        meta_3 = observations[:, 870:]
+        # Surgical Slicing of the 2560-float Grandmaster Vector.
+        meta_1 = observations[:, :120]         # Meta
+        enemy_flat = observations[:, 120:320]   # Enemies (5 slots * 40)
+        hand_flat = observations[:, 320:620]    # Hand (10 slots * 30)
+        draw_flat = observations[:, 620:920]    # Draw (10 slots * 30)
+        disc_flat = observations[:, 920:1220]   # Discard (10 slots * 30)
+        relics = observations[:, 1220:1370]     # Relics
+        env_meta = observations[:, 1370:1536]   # Overlays
+        exhaust = observations[:, 1536:1700]    # Exhaust
+        sphere = observations[:, 1700:1800]     # Sphere
+        pets = observations[:, 1800:2000]       # Pets
+        map_meta = observations[:, 2000:]       # Map
+
+        metadata = th.cat([meta_1, relics, env_meta, exhaust, sphere, pets, map_meta], dim=1)
         
-        metadata = th.cat([meta_1, meta_2, meta_3], dim=1)
-        # Reshape for CNN input: (Batch, Channels, Length)
+        # Spatial Reshaping for CNN Input: (Batch, Channels, Length)
+        enemy_spatial = enemy_flat.view(-1, 5, 40).transpose(1, 2)
         hand_spatial = hand_flat.view(-1, 10, 30).transpose(1, 2)
-        relic_spatial = relic_flat.view(-1, 20, 5).transpose(1, 2)
+        draw_spatial = draw_flat.view(-1, 10, 30).transpose(1, 2)
+        disc_spatial = disc_flat.view(-1, 10, 30).transpose(1, 2)
         
-        return self.final_dense(th.cat([self.hand_cnn(hand_spatial), self.relic_cnn(relic_spatial), self.meta_processor(metadata)], dim=1))
+        return self.final_dense(th.cat([
+            self.enemy_cnn(enemy_spatial), 
+            self.hand_cnn(hand_spatial), 
+            self.draw_cnn(draw_spatial), 
+            self.discard_cnn(disc_spatial), 
+            self.meta_processor(metadata)
+        ], dim=1))
 
 # Manages Hall of Fame models and all-time best scoring
 class GlobalPerformanceTracker:
@@ -635,9 +678,6 @@ class PhaseManagerCallback(BaseCallback):
         
         self.save_state()
         print(f"{'='*60}\n")
-        
-        self.save_state()
-        print(f"{'='*60}\n")
 
     def _on_rollout_start(self) -> None:
         if self.model.num_timesteps >= self.last_eval_step + self.eval_freq_global:
@@ -677,24 +717,43 @@ def get_newest_model_and_vec():
     return latest_model, None
 
 def create_fresh_model(env, n_steps, batch_size, weights_path=None):
-    """Initializes or resumes the MaskablePPO model with the specified hyperparameters."""
-    policy_kwargs = dict(features_extractor_class=SynergyCNNExtractor, net_arch=dict(pi=[512, 256], vf=[512, 256]))
+    """
+    Initializes or resumes the MaskablePPO model with the Grandmaster Architecture.
+    Standard: 2560-float observation space and 1024-wide neural policy.
+    """
+    # The Grandmaster Architecture uses a 2048-dim feature extractor and 1024-wide layers.
+    # This configuration is optimized for high-fidelity strategic deep learning.
+    policy_kwargs = dict(
+        features_extractor_class=SynergyCNNExtractor, 
+        net_arch=dict(pi=[1024, 1024, 512], vf=[1024, 1024, 512])
+    )
+    
     model_params = {
-        "policy": "MultiInputPolicy", "env": env, "verbose": 1, "tensorboard_log": "./tensorboard/",
-        "device": "auto", "learning_rate": 1e-4, "n_steps": n_steps, "batch_size": batch_size,
-        "n_epochs": 10, "gamma": 0.999, "gae_lambda": 0.98, "clip_range": 0.2, "ent_coef": 0.05,
-        "vf_coef": 0.7, "policy_kwargs": policy_kwargs
-
+        "policy": "MultiInputPolicy", 
+        "env": env, 
+        "verbose": 1, 
+        "tensorboard_log": "./tensorboard/",
+        "device": "auto", 
+        "learning_rate": 1e-4, # Standard learning rate for discovery phase
+        "n_steps": n_steps, 
+        "batch_size": batch_size,
+        "n_epochs": 10, 
+        "gamma": 0.999, 
+        "gae_lambda": 0.98, 
+        "clip_range": 0.2, 
+        "ent_coef": 0.10, # Initial baseline curiosity for for the fresh start
+        "vf_coef": 0.7, 
+        "policy_kwargs": policy_kwargs
     }
     
     if weights_path and os.path.exists(weights_path):
         try:
-            print(f"[LOAD] Attempting to resume full model state from {weights_path}...")
+            print(f"[LOAD] Restoring Grandmaster state from {weights_path}...")
             model = MaskablePPO.load(weights_path, env=env, n_steps=n_steps, batch_size=batch_size)
-            print(f"[LOAD] Success! Full model state restored.")
             return model
         except Exception as e:
-            print(f"[LOAD] Partial load fallback (Parameters mismatch): {e}")
+            # Fallback for parameter-compatible partial loads (e.g., Transfer Learning)
+            print(f"[LOAD] Performing Transfer Learning load from {weights_path}...")
             new_model = MaskablePPO(**model_params)
             old = MaskablePPO.load(weights_path)
             new_model.set_parameters(old.get_parameters())
@@ -706,11 +765,10 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
 def make_env(port, is_eval=False):
     """Factory function for initializing isolated game environments for the SubprocVecEnv."""
     def _init():
-        node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
-        # MANUAL CONFIG: Set this base_path to match your local Slay the Spire 2 node directory
-        base_path = f"D:\\Games\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
+        node_id = {15526: 1, 15527: 2, 15528: 3, 15529: 4}.get(port, 1)
         data_dir = f"Node{node_id}_Data"
-        base_env = SlayTheSpire2Env(port=port, game_path=base_path, user_data_dir=data_dir, force_fresh=False, is_eval=is_eval)
+        # The SlayTheSpire2Env now handles centralized path derivation from its GLOBAL_CONFIG.
+        base_env = SlayTheSpire2Env(port=port, user_data_dir=data_dir, force_fresh=False, is_eval=is_eval)
         env = ActionMasker(base_env, lambda e: e.action_masks())
         return Monitor(env, os.path.join(LOG_DIR, f"monitor_{port}_{SESSION_ID}.csv"), info_keywords=("floor",))
     return _init
@@ -730,18 +788,9 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
 def main():
     """Master entry point for the training orchestrator."""
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
-    
-    # Nuke engine logs on startup to prevent disk choking
-    appdata = os.getenv('APPDATA')
-    if appdata:
-        game_logs_path = os.path.join(appdata, "SlayTheSpire2", "logs")
-        if os.path.exists(game_logs_path):
-            for f in glob.glob(os.path.join(game_logs_path, "*")):
-                try: 
-                    if os.path.isfile(f): os.remove(f)
-                except: pass
 
     console_log_path = os.path.join(LOG_DIR, "train_console.log")
+
     sys.stdout = TeeLogger(console_log_path, mode="a")
     sys.stderr = TeeErrorLogger(console_log_path, mode="a")
     
@@ -760,13 +809,13 @@ def main():
     tracker = GlobalPerformanceTracker()
     metrics_cb = TensorboardMetricsCallback(tracker)
     
-    start_n_steps, start_batch_size = BUFFER_STAGES[0][0], BUFFER_STAGES[0][1]
+    start_batch_size, start_n_steps = BUFFER_STAGES[0][0], BUFFER_STAGES[0][1]
     if current_model_file:
         try:
             temp_model = MaskablePPO.load(current_model_file)
             current_steps = temp_model.num_timesteps
             del temp_model
-            for n_steps, batch_size, stage_end in BUFFER_STAGES:
+            for batch_size, n_steps, stage_end in BUFFER_STAGES:
                 if current_steps < stage_end:
                     start_n_steps, start_batch_size = n_steps, batch_size
                     break
@@ -774,10 +823,14 @@ def main():
 
     model = None
     try:
-        for n_steps, batch_size, stage_end in BUFFER_STAGES:
+        for batch_size, n_steps, stage_end in BUFFER_STAGES:
+            # The Evaluation Frequency is locked to the rollout cycle (n_steps * 3 nodes).
             eval_freq_global = n_steps * len(TRAIN_PORTS) 
-            if stage_end == 18_432: 
-                eval_freq_global *= 2
+            
+            # Stage 1 (Warmup): No exams are triggered during the discovery phase.
+            # We set eval_freq_global to exceed stage_end to ensure discovery only.
+            if stage_end == 24_576: 
+                eval_freq_global = stage_end + 1
             
             phase_cb = PhaseManagerCallback(eval_env, eval_freq_global, tracker, n_eval_episodes=10)
             

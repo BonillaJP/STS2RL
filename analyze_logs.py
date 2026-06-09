@@ -108,7 +108,7 @@ def generate_report():
         print(f"  > Entropy Loss: {entropy:.4f} (Exploration: {'HIGH' if entropy < -1.0 else 'LOW'})")
         print(f"  > Policy/Value: approx_kl: {kl:.4f} | value_loss: {v_loss:.4f} | lr: {latest.get('train/learning_rate', 0):.2e}")
     else:
-        print("- Technical Health: progress.csv is empty (Waiting for first 3,072 steps to complete).")
+        print("- Technical Health: progress.csv is empty (Waiting for first 12,288 steps to complete).")
 
     print("\n### PART 2: EVALUATION TELEMETRY (Mastery Exams)")
     
@@ -161,7 +161,12 @@ def generate_report():
     if appdata:
         godot_log_dir = os.path.join(appdata, "SlayTheSpire2", "logs")
         if os.path.exists(godot_log_dir):
-            total_size_bytes = sum(os.path.getsize(os.path.join(godot_log_dir, f)) for f in os.listdir(godot_log_dir) if os.path.isfile(os.path.join(godot_log_dir, f)))
+            total_size_bytes = 0
+            for f in os.listdir(godot_log_dir):
+                f_path = os.path.join(godot_log_dir, f)
+                if os.path.isfile(f_path):
+                    try: total_size_bytes += os.path.getsize(f_path)
+                    except: pass
             size_gb = total_size_bytes / (1024**3)
             print(f"- Godot Log Size: {size_gb:.2f} GB")
             if size_gb > 5.0:

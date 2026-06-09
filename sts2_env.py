@@ -16,7 +16,7 @@ def stable_hash(name, max_val=10000):
     if not name: return 0
     return (int(hashlib.md5(str(name).encode()).hexdigest(), 16) % max_val) + 1
 
-# Maps the neural network's 317 discrete outputs to specific game commands.
+# Maps the neural network's 342 discrete outputs to specific game commands.
 FLAT_ACTIONS = []
 for c in range(10): 
     for t in range(5): FLAT_ACTIONS.append({"action": "play_card", "card_index": c, "target_idx": t})
@@ -35,7 +35,7 @@ FLAT_ACTIONS.append({"action": "advance_dialogue"})
 for o in range(5): FLAT_ACTIONS.append({"action": "choose_rest_option", "index": o})
 for i in range(15): FLAT_ACTIONS.append({"action": "shop_purchase", "index": i})
 for n in range(5): FLAT_ACTIONS.append({"action": "choose_map_node", "index": n})
-for c in range(25): FLAT_ACTIONS.append({"action": "select_card", "index": c}) 
+for c in range(50): FLAT_ACTIONS.append({"action": "select_card", "index": c}) 
 FLAT_ACTIONS.extend([{"action": "confirm_selection"}, {"action": "cancel_selection"}])
 for b in range(5): FLAT_ACTIONS.append({"action": "select_bundle", "index": b})
 FLAT_ACTIONS.extend([{"action": "confirm_bundle_selection"}, {"action": "cancel_bundle_selection"}])
@@ -43,7 +43,6 @@ for r in range(5): FLAT_ACTIONS.append({"action": "select_relic", "index": r})
 FLAT_ACTIONS.append({"action": "skip_relic_selection"})
 for r in range(5): FLAT_ACTIONS.append({"action": "claim_treasure_relic", "index": r})
 
-# 'back' replaces 'abandon' to maintain 317 actions
 MENU_OPTS = ["main_menu", "singleplayer", "standard", "IRONCLAD", "embark", "continue", "yes", "no", "back", "settings"]
 for m in MENU_OPTS: FLAT_ACTIONS.append({"action": "menu_select", "option": m})
 
@@ -53,6 +52,49 @@ for y in range(11):
     for x in range(9): FLAT_ACTIONS.append({"action": "crystal_sphere_click_cell", "x": x, "y": y})
 FLAT_ACTIONS.append({"action": "crystal_sphere_proceed"})
 
+# ==============================================================================
+# GLOBAL MODIFIERS & CONFIGURATION
+# ==============================================================================
+# Use this section to tune the agent's behavior, paths, and reward weights.
+GLOBAL_CONFIG = {
+    # The base path to your Slay the Spire 2 node folders. 
+    # The code will automatically append the Node ID (1, 2, 3, or 4) to this path.
+    "BASE_PATH_TEMPLATE": r"D:\Games\Steam\steamapps\common\STS2_Node_",
+    
+    # Global stability throttle: adds a small delay (seconds) between actions 
+    # to allow the game's animation engine to keep up.
+    "STABILITY_THROTTLE": 0.05,
+    
+    # The base penalty for every action taken. 
+    # Forces the agent to be efficient and avoid stalling.
+    "STEP_TAX": -0.05,
+    
+    # Reward Bounties: Positive reinforcement for achieving milestones.
+    "BOUNTIES": {
+        "FLOOR_CLIMB": 10.0,      # Reward for reaching a new floor.
+        "BOSS_KILL": 100.0,       # Massive reward for winning an Act.
+        "BOSS_REACH": 50.0,       # Reward for surviving until the Boss floor.
+        "ELITE_KILL": 15.0,       # Reward for defeating an Elite.
+        "ELITE_SIGHT": 5.0,        # Reward for initiating an Elite fight (if healthy).
+        "SMITH_BASE": 15.0,       # Base reward for upgrading a card.
+        "CARD_REMOVAL": 15.0,     # Reward for thinning the deck of basic cards.
+        "DRAFT_CARD": 2.0,        # Early-game incentive to add cards to the deck.
+        "POTION_USE": 2.0,        # Small reward for using consumables in tough fights.
+        "NEW_RELIC": 25.0,        # Reward for finding a new relic.
+    },
+    
+    # Stagnation Thresholds: When the agent stops making progress.
+    "STAGNATION": {
+        "LOW_PENALTY_STEP": 10,   # Apply -2.0 tax after this many steps.
+        "HIGH_PENALTY_STEP": 20,  # Apply -10.0 tax after this many steps.
+        "CRITICAL_STEP": 50,      # Apply -20.0 tax after this many steps.
+        "REBOOT_STEP": 200,       # Force-restart the game node after this many steps.
+    },
+
+    # Observation Vector Size: 2560 floats (Grandmaster Architecture).
+    "OBS_SIZE": 2560
+}
+
 ENCHANTMENT_KEYWORDS = ["adroit", "corrupted", "glam", "goopy", "imbued", "instinct", "momentum", "nimble", "perfect fit", "royally approved", "sharp", "slither", "soul's power", "sown", "swift", "vigorous"]
 OVERLAY_KEYS = ["card_select", "enchanting", "enchant", "transform", "simple_select", "choose", "upgrade_select", "remove"]
 
@@ -61,16 +103,11 @@ class SlayTheSpire2Env(gym.Env):
         super().__init__()
         self.port = port
         
-        if game_path and os.path.isdir(game_path):
-            node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
-            game_path = os.path.join(game_path, f"Node {node_id}.exe")
+        node_id = {15526: 1, 15527: 2, 15528: 3, 15529: 4}.get(port, 1)
         
-        # Find the game executable path.
-        # MANUAL CONFIG: Change the path below to match where Slay the Spire 2 is installed on your computer.
-        if not game_path or not os.path.exists(game_path):
-            node_id = {15526:1, 15527:2, 15528:3, 15529:4}.get(port, 1)
-            # Example path: "C:\\Program Files (x86)\\Steam\\steamapps\\common\\SlayTheSpire2"
-            base_node_path = f"D:\\Games\\Steam\\steamapps\\common\\STS2_Node_{node_id}"
+        # Centralized Path Management: derived from GLOBAL_CONFIG.
+        if not game_path:
+            base_node_path = f"{GLOBAL_CONFIG['BASE_PATH_TEMPLATE']}{node_id}"
             game_path = os.path.join(base_node_path, f"Node {node_id}.exe")
             if not os.path.exists(game_path):
                 game_path = os.path.join(base_node_path, "SlayTheSpire2.exe")
@@ -81,7 +118,9 @@ class SlayTheSpire2Env(gym.Env):
         self.is_eval = is_eval
         self.game_url = f"http://127.0.0.1:{port}/api/v1/singleplayer"
         self.action_space = spaces.Discrete(len(FLAT_ACTIONS))
-        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(1536,), dtype=np.float32)
+        
+        # The Grandmaster Observation Vector (2560 floats).
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(GLOBAL_CONFIG["OBS_SIZE"],), dtype=np.float32)
 
         self.session = None
         self.current_state = {}
@@ -117,7 +156,11 @@ class SlayTheSpire2Env(gym.Env):
         self.state_rejection_count = 0
         self.ghost_save_cleanup_pending = False
         self.full_purge_cleanup_pending = False
-        self._vacuum_disk(full_nuke=True)
+        
+        # Cluster Startup Safety: Only the primary node (15526) performs the initial disk vacuum 
+        # to prevent file-lock collisions on Windows.
+        if self.port == 15526:
+            self._vacuum_disk(full_nuke=True)
         
         self.trace_path = f"logs/node_trace_{self.port}.jsonl"
         try: 
@@ -290,7 +333,7 @@ class SlayTheSpire2Env(gym.Env):
             time.sleep(1.0)
 
     def action_masks(self):
-        """Calculates a boolean mask for the 317-action space based on the current game screen."""
+        """Calculates a boolean mask for the 342-action space based on the current game screen."""
         state = self.current_state
         mask = np.zeros(len(FLAT_ACTIONS), dtype=bool)
         if not state: return mask
@@ -424,37 +467,46 @@ class SlayTheSpire2Env(gym.Env):
                 if num_selected < max_sel:
                     merged_selected = set(selected_indices) | set(map(str, self.internal_selection_history))
                     if len(merged_selected) < max_sel:
-                        set_mask(160, 25, [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in merged_selected])
+                        set_mask(160, 50, [c.get("index") for c in cs.get("cards", []) if str(c.get("index")) not in merged_selected])
                 if can_confirm or num_selected >= max_sel: 
-                    mask[185] = True
-                    mask[186] = False # Commitment Gate: Lock once requirement is met
+                    mask[210] = True
+                    mask[211] = False # Commitment Gate: Lock once requirement is met
                 else:
-                    if num_selected > 0: mask[186] = True
-                    elif cs.get("can_cancel"): mask[186] = True
+                    if num_selected > 0: mask[211] = True
+                    elif cs.get("can_cancel"): mask[211] = True
             else:
-                set_mask(160, 25, [c.get("index") for c in cs.get("cards", [])])
-                if cs.get("can_cancel"): mask[186] = True
+                set_mask(160, 50, [c.get("index") for c in cs.get("cards", [])])
+                if cs.get("can_cancel"): mask[211] = True
             if cs.get("can_proceed"): mask[123] = True
         elif screen == "bundle_select":
             # Selection of sets of items
             bs = state.get("bundle_select", {})
-            set_mask(187, 5, [b.get("index") for b in bs.get("bundles", [])])
-            if bs.get("can_confirm"): mask[192] = True
-            if bs.get("can_cancel"): mask[193] = True
+            set_mask(212, 5, [b.get("index") for b in bs.get("bundles", [])])
+            if bs.get("can_confirm"): mask[217] = True
+            if bs.get("can_cancel"): mask[218] = True
         elif screen == "relic_select":
             # Choosing a specific relic reward
             rs = state.get("relic_select", {})
-            set_mask(194, 5, [r.get("index") for r in rs.get("relics", [])])
-            if rs.get("can_skip"): mask[199] = True
+            set_mask(219, 5, [r.get("index") for r in rs.get("relics", [])])
+            if rs.get("can_skip"): mask[224] = True
         elif screen == "treasure":
             # Looting chest rooms
-            set_mask(200, 5, [r.get("index") for r in state.get("treasure", {}).get("relics", [])])
+            set_mask(225, 5, [r.get("index") for r in state.get("treasure", {}).get("relics", [])])
             if state.get("treasure", {}).get("can_proceed"): mask[123] = True
+        elif screen == "crystal_sphere":
+            cs = state.get("crystal_sphere", {})
+            if cs.get("can_use_big_tool"): mask[240] = True
+            if cs.get("can_use_small_tool"): mask[241] = True
+            for cell in cs.get("clickable_cells", []):
+                x, y = cell.get("x", 0), cell.get("y", 0)
+                if 0 <= x < 9 and 0 <= y < 11:
+                    mask[242 + (y * 9) + x] = True
+            if cs.get("can_proceed"): mask[341] = True
 
         # Global navigation menu options
         opts = [o.get("name", "").lower() if isinstance(o, dict) else o.lower() for o in state.get("options", [])]
         for i, m in enumerate(MENU_OPTS):
-            if m.lower() in opts and m.lower() != "settings": mask[205 + i] = True
+            if m.lower() in opts and m.lower() != "settings": mask[230 + i] = True
 
         # Action-use cap: mask any action used more than 20 times on the same screen to prevent policy loops
         for act_idx, count in self.state_action_counts.items():
@@ -617,26 +669,41 @@ class SlayTheSpire2Env(gym.Env):
             continue # Reached via 'break' (reboot already triggered), restart iterative loop
 
     def _flatten_state(self, state):
-        obs = np.zeros(1536, dtype=np.float32)
+        # Grandmaster Observation Vector: derived from GLOBAL_CONFIG.
+        # This vector encodes the absolute state of the game for the neural policy.
+        obs = np.zeros(GLOBAL_CONFIG["OBS_SIZE"], dtype=np.float32)
         if not state: return obs
+        
+        # Screen Mapping: Normalizes the game state context.
         screen_map = {"monster": 1, "elite": 2, "boss": 3, "map": 4, "event": 5, "rest_site": 6, "rewards": 7, "card_reward": 8, "shop": 9, "neow": 10, "game_over": 11, "treasure": 12, "hand_select": 13, "card_select": 14, "enchanting": 14, "enchant": 14, "transform": 14, "simple_select": 14, "choose": 14, "upgrade_select": 14, "remove": 14, "menu": 18, "crystal_sphere": 19}
         st_type = state.get("state_type", "")
         obs[0] = screen_map.get(st_type, 0) / 20.0
+        
+        # Metadata [1-120]: Global character and run statistics.
         run, player = state.get("run", {}), state.get("player", {})
         obs[1], obs[2], obs[3] = run.get("act", 1)/5.0, run.get("floor", 0)/100.0, run.get("ascension", 0)/20.0
         max_hp = max(player.get("max_hp", 1), 1)
         obs[4], obs[5], obs[6], obs[7] = player.get("hp", 0)/max_hp, max_hp/150.0, player.get("block", 0)/100.0, player.get("gold", 0)/1000.0
         obs[8], obs[9] = player.get("energy", 0)/10.0, player.get("max_energy", 3)/10.0
         obs[10], obs[11], obs[12] = player.get("draw_pile_count", 0)/30.0, player.get("discard_pile_count", 0)/30.0, player.get("exhaust_pile_count", 0)/30.0
+        
+        # Core Statuses [20-50]: Tracking character scaling and debuffs.
         status = {s.get("id"): s.get("amount", 0) for s in player.get("status", [])}
         core_statuses = ["Strength", "Dexterity", "Vulnerable", "Weak", "Frail", "No-Draw", "Entangled", "Artifact", "Barricade", "Dark Embrace", "Feel No Pain", "Corruption", "Evolve", "Fire Breathing", "Juggernaut", "Rupture"]
         for i, s_id in enumerate(core_statuses): obs[20 + i] = status.get(s_id, 0) / 10.0
+        
         obs[50], obs[51] = player.get("stars", 0) / 10.0, player.get("orb_slots", 0) / 10.0
         for i, orb in enumerate(player.get("orbs", [])[:10]): obs[55 + i] = stable_hash(orb.get("id")) / 10000.0
+        
+        # Potion Sensors [70-120]: Tracking consumables and their targets.
         for i, pot in enumerate(player.get("potions", [])[:5]):
             base = 70 + (i * 10)
             obs[base], obs[base+1] = stable_hash(pot.get("id")) / 10000.0, (1.0 if pot.get("can_use_in_combat") else 0.0)
-        enemies = state.get("battle", {}).get("enemies", [])
+
+        # Combat Intelligence [120-320]: Detailed scanning of up to 5 enemies.
+        # Features: Entity ID, HP%, Block, Intent (Type & Dmg), and 10 Statuses per enemy.
+        battle = state.get("battle", {})
+        enemies = battle.get("enemies", [])
         for i, enemy in enumerate(enemies[:5]):
             base = 120 + (i * 40)
             obs[base], obs[base+1], obs[base+2] = stable_hash(enemy.get("entity_id"))/10000.0, enemy.get("hp", 0)/max(enemy.get("max_hp", 1), 1), enemy.get("block", 0)/100.0
@@ -647,75 +714,123 @@ class SlayTheSpire2Env(gym.Env):
                     dmg = int(label.split("x")[0])*int(label.split("x")[1]) if "x" in label else int(label)
                     obs[base+4] = dmg / 50.0
                 except: pass
+            
+            # Enemy Status Tracking: Crucial for recognizing scaling threats like Gremlin Nob.
+            e_status = {s.get("id"): s.get("amount", 0) for s in enemy.get("status", [])}
+            e_core = ["Strength", "Ritual", "Vulnerable", "Weak", "Artifact", "Metallicize", "Malleable", "Regrow", "Angry", "Curiosity"]
+            for j, s_id in enumerate(e_core): obs[base + 10 + j] = e_status.get(s_id, 0) / 10.0
+
         def encode_card(card, base_idx):
+            """Semantic Card Vision: Encodes 30 features per card including AOE and Multi-Hit detection."""
             if not card: return
             c_cost_raw = card.get("cost") if card.get("cost") is not None else card.get("card_cost")
             desc = (card.get("description") or card.get("card_description") or "").lower()
+            
+            # Semantic Weapon Sensors
+            # AOE detection via target_type and keyword search.
+            is_aoe = (card.get("target_type") in ["AllEnemies", "All"]) or ("all enemies" in desc) or ("all enemy" in desc)
+            # Multi-Hit detection via 'times' keyword.
+            is_multi = ("times" in desc)
+            # Scaling detection for Patient Power strategies.
+            is_scaling = any(kw in desc for kw in ["strength", "dexterity", "focus", "artifact", "plating"])
+            
             if c_cost_raw == "X": cost_val = -0.2
             elif isinstance(c_cost_raw, (int, float)): cost_val = float(c_cost_raw) / 5.0
             elif isinstance(c_cost_raw, str) and (c_cost_raw.isdigit() or (c_cost_raw.startswith("-") and c_cost_raw[1:].isdigit())): cost_val = float(c_cost_raw) / 5.0
             else: cost_val = 0.0
+            
             can_play_flag = card.get("can_play")
             if can_play_flag is None: can_play_flag = card.get("can_afford", True)
+            
             obs[base_idx], obs[base_idx+1] = stable_hash(card.get("id") or card.get("card_id"))/10000.0, cost_val
             obs[base_idx+2], obs[base_idx+3] = (1.0 if card.get("is_upgraded") or card.get("card_upgraded") or "+" in (card.get("name") or "") else 0.0), (1.0 if can_play_flag else 0.0)
-            obs[base_idx+4], obs[base_idx+5], obs[base_idx+6], obs[base_idx+7] = (1.0 if "exhaust" in desc else 0.0), (1.0 if "strength" in desc else 0.0), (1.0 if "block" in desc else 0.0), (1.0 if "damage" in desc else 0.0)
+            
+            # Semantic Flags
+            obs[base_idx+4], obs[base_idx+5], obs[base_idx+6] = (1.0 if is_aoe else 0.0), (1.0 if is_multi else 0.0), (1.0 if is_scaling else 0.0)
+            
+            # Standard Keyword Support
+            obs[base_idx+7], obs[base_idx+8], obs[base_idx+9] = (1.0 if "exhaust" in desc else 0.0), (1.0 if "block" in desc else 0.0), (1.0 if "damage" in desc else 0.0)
+
+            
             found_ench = next((e for e in ENCHANTMENT_KEYWORDS if e in desc), None)
-            obs[base_idx+8], obs[base_idx+9] = (stable_hash(found_ench)/10000.0 if found_ench else 0.0), (1.0 if found_ench else 0.0)
-            obs[base_idx+10] = stable_hash(card.get("type") or card.get("card_type"))/10000.0
-            obs[base_idx+11] = {"Common":0.1, "Uncommon":0.3, "Rare":0.5, "Basic":0.0, "Special":0.7, "Curse":0.9}.get(card.get("rarity") or card.get("card_rarity"), 0.0)
-            obs[base_idx+12] = 1.0 if (card.get("is_selected") or card.get("is_chosen") or card.get("selected")) else 0.0
+            obs[base_idx+10], obs[base_idx+11] = (stable_hash(found_ench)/10000.0 if found_ench else 0.0), (1.0 if found_ench else 0.0)
+            obs[base_idx+12] = stable_hash(card.get("type") or card.get("card_type"))/10000.0
+            obs[base_idx+13] = {"Common":0.1, "Uncommon":0.3, "Rare":0.5, "Basic":0.0, "Special":0.7, "Curse":0.9}.get(card.get("rarity") or card.get("card_rarity"), 0.0)
+            obs[base_idx+14] = 1.0 if (card.get("is_selected") or card.get("is_chosen") or card.get("selected")) else 0.0
+
+        # Triple-Eye Vision [320-1220]: Hand, Draw Pile (Top 10), and Discard Pile (Top 10).
         hand = player.get("hand", [])
         if st_type=="hand_select": hand=state.get("hand_select", {}).get("cards", [])
         elif st_type=="card_reward": hand=state.get("card_reward", {}).get("cards", [])
         elif st_type in OVERLAY_KEYS: hand=state.get(st_type, {}).get("cards", [])
         for i, card in enumerate(hand[:10]): encode_card(card, 320 + (i * 30))
-        if st_type=="hand_select": obs[620], obs[621] = 1.0, len(state.get("hand_select", {}).get("selected_cards", []))/10.0
-        elif st_type=="rewards":
-            obs[630], obs[631] = 1.0, len(state.get("rewards", {}).get("items", []))/15.0
-            rew = state.get("rewards", {})
-            obs[632] = 1.0 if rew.get("can_proceed") else 0.0
-            for i, item in enumerate(rew.get("items", [])[:15]):
-                base = 640 + (i * 2)
-                obs[base] = stable_hash(item.get("type")) / 10000.0
-                if item.get("type") == "gold": obs[base+1] = item.get("gold_amount", 0) / 500.0
-                else: obs[base+1] = stable_hash(item.get("potion_id") or item.get("relic_id") or item.get("card_id")) / 10000.0
-        if st_type == "shop" or st_type == "fake_merchant":
-            shop = state.get(st_type, {}).get("shop", {}) if st_type == "fake_merchant" else state.get("shop", {})
-            obs[632] = 1.0 if shop.get("can_proceed") else 0.0
-            for i, item in enumerate(shop.get("items", [])[:15]):
-                base = 671 + (i * 4)
-                obs[base], obs[base+1] = stable_hash(item.get("category"))/10000.0, stable_hash(item.get("card_id") or item.get("relic_id") or item.get("potion_id") or "card_removal")/10000.0
-                obs[base+2], obs[base+3] = (item.get("price", item.get("cost", 0))/500.0), (1.0 if item.get("can_afford") and item.get("is_stocked") else 0.0)
-        elif st_type in ["rest_site", "treasure"]: obs[632] = 1.0 if state.get(st_type, {}).get("can_proceed") else 0.0
+        
+        draw_pile = player.get("draw_pile", [])
+        for i, card in enumerate(draw_pile[:10]): encode_card(card, 620 + (i * 30))
+        
+        discard_pile = player.get("discard_pile", [])
+        for i, card in enumerate(discard_pile[:10]): encode_card(card, 920 + (i * 30))
+
+        # Relic Vision [1220-1370]: Tracking character items.
         relics = player.get("relics", [])
         if st_type=="relic_select": relics=state.get("relic_select", {}).get("relics", [])
         elif st_type=="treasure": relics=state.get("treasure", {}).get("relics", [])
-        for i, relic in enumerate(relics[:20]):
-            base = 770 + (i * 5)
+        for i, relic in enumerate(relics[:30]):
+            base = 1220 + (i * 5)
             obs[base], obs[base+1] = stable_hash(relic.get("id") or relic.get("relic_id"))/10000.0, (relic.get("counter")/10.0) if relic.get("counter") is not None else 0.0
-        for i, node in enumerate(state.get("map", {}).get("nodes", [])[:50]):
-            base = 870 + (i * 10)
-            if base+2 < 1536: obs[base], obs[base+1], obs[base+2] = node.get("col", 0)/7.0, node.get("row", 0)/15.0, stable_hash(node.get("type"))/10000.0
+
+        # Environment & Map Intelligence [1370-1536]: Shop, Rewards, and Navigation state.
+        if st_type=="hand_select": obs[1370], obs[1371] = 1.0, len(state.get("hand_select", {}).get("selected_cards", []))/10.0
+        elif st_type=="rewards":
+            obs[1380], obs[1381] = 1.0, len(state.get("rewards", {}).get("items", []))/15.0
+            rew = state.get("rewards", {})
+            obs[1382] = 1.0 if rew.get("can_proceed") else 0.0
+            for i, item in enumerate(rew.get("items", [])[:15]):
+                base = 1390 + (i * 2)
+                obs[base] = stable_hash(item.get("type")) / 10000.0
+                if item.get("type") == "gold": obs[base+1] = item.get("gold_amount", 0) / 500.0
+                else: obs[base+1] = stable_hash(item.get("potion_id") or item.get("relic_id") or item.get("card_id")) / 10000.0
+        
+        if st_type == "shop" or st_type == "fake_merchant":
+            shop = state.get(st_type, {}).get("shop", {}) if st_type == "fake_merchant" else state.get("shop", {})
+            obs[1382] = 1.0 if shop.get("can_proceed") else 0.0
+            for i, item in enumerate(shop.get("items", [])[:15]):
+                base = 1421 + (i * 4)
+                obs[base], obs[base+1] = stable_hash(item.get("category"))/10000.0, stable_hash(item.get("card_id") or item.get("relic_id") or item.get("potion_id") or "card_removal")/10000.0
+                obs[base+2], obs[base+3] = (item.get("price", item.get("cost", 0))/500.0), (1.0 if item.get("can_afford") and item.get("is_stocked") else 0.0)
+        
+        # Exhaust Radar [1536-1700]: Summary densities of exhausted cards.
+        exhaust_pile = player.get("exhaust_pile", [])
+        obs[1536] = len(exhaust_pile) / 50.0
+        ex_types = {"Attack": 0, "Skill": 0, "Power": 0, "Status": 0, "Curse": 0}
+        for c in exhaust_pile:
+            c_type = c.get("type") or c.get("card_type", "Unknown")
+            if c_type in ex_types: ex_types[c_type] += 1
+        for i, (k, v) in enumerate(ex_types.items()): obs[1540 + i] = v / 30.0
+
+        # Crystal Sphere Grid [1700-1800]: 9x11 spatial mapping.
         if st_type == "crystal_sphere":
             cs = state.get("crystal_sphere", {})
             for cell in cs.get("cells", []):
-                idx = 1370 + (cell.get("y", 0) * 9) + cell.get("x", 0)
-                if idx < 1469:
+                idx = 1700 + (cell.get("y", 0) * 9) + cell.get("x", 0)
+                if idx < 1800:
                     val = 0.0
                     if not cell.get("is_hidden"):
                         val = 1.0 if cell.get("is_good") else -1.0
                         if item := cell.get("item_type"): val += (stable_hash(item) / 20000.0)
                     obs[idx] = val
-        for i, pet in enumerate(player.get("pets", [])[:3]):
-            base = 1469 + (i * 14)
+
+        # Summoned Pets & Minions [1800-2000]: Tracking active combat companions.
+        for i, pet in enumerate(player.get("pets", [])[:5]):
+            base = 1800 + (i * 20)
             obs[base], obs[base+1], obs[base+2] = stable_hash(pet.get("id"))/10000.0, pet.get("hp",0)/max(pet.get("max_hp",1),1), pet.get("block",0)/100.0
             for j, s in enumerate(pet.get("status", [])[:5]): obs[base+3+(j*2)], obs[base+4+(j*2)] = stable_hash(s.get("id"))/10000.0, s.get("amount",0)/10.0
-        if st_type in ["event", "neow"]:
-            ev = state.get("event") or state.get("neow") or {}
-            for i, opt in enumerate(ev.get("options", [])[:10]):
-                base = 1511 + (i * 2)
-                if base + 1 < 1536: obs[base], obs[base+1] = stable_hash(opt.get("title"))/10000.0, (0.0 if opt.get("is_locked") else 1.0)
+
+        # Map Intelligence [2000-2560]: Spire navigation and future expansion.
+        for i, node in enumerate(state.get("map", {}).get("nodes", [])[:50]):
+            base = 2000 + (i * 10)
+            if base+2 < 2560: obs[base], obs[base+1], obs[base+2] = node.get("col", 0)/7.0, node.get("row", 0)/15.0, stable_hash(node.get("type"))/10000.0
+        
         return obs
 
     def step(self, action_idx):
@@ -727,15 +842,6 @@ class SlayTheSpire2Env(gym.Env):
         # Capture state hash baseline for accurate transition detection
         old_state_hash = hashlib.md5(json.dumps(self.current_state, sort_keys=True).encode()).hexdigest()
 
-        # Storage Bloat Failsafe
-        appdata = os.getenv('APPDATA')
-        if appdata:
-            log_path = os.path.join(appdata, "SlayTheSpire2", "logs", "godot.log")
-            if os.path.exists(log_path) and os.path.getsize(log_path) > 1024 * 1024 * 1024:
-                self.reboot_reason = "Storage Bloat (>1GB)"
-                self.needs_reboot = True
-                return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
-
         fresh_state = self._raw_state()
         if fresh_state: self.current_state = fresh_state
         if self.current_state.get("state_type") == "menu" and self.current_state.get("menu_screen") == "popup":
@@ -745,8 +851,8 @@ class SlayTheSpire2Env(gym.Env):
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "engine_bug": True}
 
         # Hard deadlock failsafe: reset if no progress for 200 steps
-        if self.stagnant_steps >= 200:
-            self.reboot_reason = "Deadlock (200 Steps)"; self.needs_reboot = True
+        if self.stagnant_steps >= GLOBAL_CONFIG["STAGNATION"]["REBOOT_STEP"]:
+            self.reboot_reason = f"Deadlock ({GLOBAL_CONFIG['STAGNATION']['REBOOT_STEP']} Steps)"; self.needs_reboot = True
             # Void reward to prevent training on technical failures
             return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "reboot_void": True}
         
@@ -766,7 +872,7 @@ class SlayTheSpire2Env(gym.Env):
         
         is_autokick, rejected = False, not self.action_masks()[action_idx]
         if rejected: self.state_rejection_count += 1
-        if self.state_rejection_count >= 20 or self.stagnant_steps >= 200:
+        if self.state_rejection_count >= 20 or self.stagnant_steps >= GLOBAL_CONFIG["STAGNATION"]["REBOOT_STEP"]:
             is_autokick = True
             m = self.action_masks()
             valid_actions = [i for i, val in enumerate(m) if val]
@@ -798,7 +904,7 @@ class SlayTheSpire2Env(gym.Env):
         
         valid = self._post(payload)
         
-        # Wait for API to register the action outcome. 100ms cap.
+        # Wait for API to register the action outcome.
         if payload.get("action") in ["choose_map_node", "proceed"]:
             new_state = self._raw_state()
             old_screen = self.current_state.get("state_type")
@@ -811,10 +917,10 @@ class SlayTheSpire2Env(gym.Env):
                     if st == "rewards" and (new_state.get("rewards", {}).get("items") or new_state.get("rewards", {}).get("can_proceed")): break
                     if st == "treasure" and (new_state.get("treasure", {}).get("items") or new_state.get("treasure", {}).get("can_proceed")): break
                     if st not in ["map", "event", "neow", "rewards", "treasure"]: break
-                time.sleep(0.05); new_state = self._raw_state()
-        elif payload.get("action") in ["select_card", "combat_select_card", "select_card_reward", "claim_reward", "end_turn", "confirm_selection", "combat_confirm_selection", "cancel_selection", "skip_card_reward", "skip_relic_selection", "claim_treasure_relic", "select_bundle", "confirm_bundle_selection", "select_relic", "shop_purchase", "choose_event_option", "advance_dialogue", "choose_rest_option", "menu_select"]:
+                time.sleep(GLOBAL_CONFIG["STABILITY_THROTTLE"]); new_state = self._raw_state()
+        elif payload.get("action") in ["select_card", "combat_select_card", "select_card_reward", "claim_reward", "end_turn", "confirm_selection", "combat_confirm_selection", "cancel_selection", "skip_card_reward", "skip_relic_selection", "claim_treasure_relic", "select_bundle", "confirm_bundle_selection", "cancel_bundle_selection", "select_relic", "shop_purchase", "choose_event_option", "advance_dialogue", "choose_rest_option", "menu_select", "crystal_sphere_set_tool", "crystal_sphere_click_cell"]:
             new_state = self._raw_state()
-            for _ in range(40): # Max 400ms synchronization window
+            for _ in range(40): # Max synchronization window
                 if not new_state: break
                 
                 # Screen-Specific Exit Gates: Ensure the game has physically processed the choice
@@ -845,11 +951,11 @@ class SlayTheSpire2Env(gym.Env):
                 if new_hash != old_state_hash: break
                 time.sleep(0.01); new_state = self._raw_state()
         else:
-            time.sleep(0.05) # 50ms Stability Throttle for combat/standard actions
+            time.sleep(GLOBAL_CONFIG["STABILITY_THROTTLE"]) # Stability Throttle for combat/standard actions
             new_state = self._raw_state()
 
         if not valid or not new_state:
-            time.sleep(0.05); new_state = self._raw_state()
+            time.sleep(GLOBAL_CONFIG["STABILITY_THROTTLE"]); new_state = self._raw_state()
             if not new_state:
                 self.reboot_reason = "API Invalid"; self.needs_reboot = True
                 return self._flatten_state(self.current_state), 0.0, True, False, {"floor": self.previous_floor, "reboot_void": True}
@@ -874,20 +980,20 @@ class SlayTheSpire2Env(gym.Env):
         hp_ratio = self.previous_hp / max_hp
         hp_delta = player_now.get("hp", 0) - self.previous_hp
 
-        # Card Removal: +15.0 for removing cards with 'Basic' rarity (Strikes/Defends).
+        # Card Removal: reward for thinning basic cards.
         current_basic_count = sum(1 for c in player_now.get("deck", []) if (c.get("rarity") or c.get("card_rarity")) == "Basic")
         if current_basic_count < self.last_prog_basic_card_count and self.last_prog_basic_card_count > 0:
-            b_breakdown["bounty"] += 15.0
+            b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["CARD_REMOVAL"]
         self.last_prog_basic_card_count = current_basic_count
 
-        # Potion Use: +2.0 for using a consumable during Elite or Boss encounters.
-        if payload.get("action") == "use_potion" and new_screen in ["elite", "boss"]:
-            b_breakdown["bounty"] += 2.0
+        # Potion Use: reward for using a consumable during Elite or Boss encounters.
+        if payload.get("action") == "use_potion" and self.last_prog_screen in ["elite", "boss"]:
+            b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["POTION_USE"]
 
-        # Relic Hunter: +25.0 for acquiring a new relic.
+        # Relic Hunter: reward for acquiring a new relic.
         current_relic_count = len(player_now.get("relics", []))
         if current_relic_count > self.last_prog_relic_count and self.last_prog_relic_count >= 0:
-            b_breakdown["bounty"] += 25.0
+            b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["NEW_RELIC"]
 
         # Bounties
         if self.last_prog_screen == "elite" and new_screen == "rewards": self.pending_elite_bounty = True
@@ -915,18 +1021,17 @@ class SlayTheSpire2Env(gym.Env):
             overflow = (self.previous_hp + potential_heal) - max_hp
             if overflow <= 5:
                 # Clean Heal: Rewarded for perfect efficiency.
-                b_breakdown["bounty"] += 15.0
+                b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["SMITH_BASE"]
             else:
                 # Wasteful Heal: Penalized for resource waste.
-                waste_penalty = min(15.0, (overflow / potential_heal) * 20.0)
+                waste_penalty = min(GLOBAL_CONFIG["BOUNTIES"]["SMITH_BASE"], (overflow / potential_heal) * (GLOBAL_CONFIG["BOUNTIES"]["SMITH_BASE"] * 1.33))
                 b_breakdown["bounty"] -= waste_penalty
                 self._log_action(f"-> WASTEFUL HEAL: Overflew by {overflow:.1f} HP.")
 
         # Hardcore Elite Ambition: Penalizes entering an Elite fight with dangerously low HP.
-        # Penalty is tapered: -5.0 in Phase 1, scaling to -15.0 in Phase 4+ to encourage early learning.
         if new_screen == "elite" and self.last_prog_screen != "elite":
             if hp_ratio > 0.5:
-                b_breakdown["bounty"] += 5.0
+                b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["ELITE_SIGHT"]
             elif hp_ratio < 0.3:
                 e_penalty = -5.0 if self.training_phase <= 1 else -10.0 if self.training_phase == 2 else -15.0
                 b_breakdown["bounty"] += e_penalty
@@ -938,51 +1043,49 @@ class SlayTheSpire2Env(gym.Env):
             self.combat_turn_count = 0
 
         # Time/Efficiency Taxes: Forces the agent to prioritize speed and decisiveness.
-        # Master Class Step Tax: -0.05 per action
-        base_tax = 0.05
-        if self.stagnant_steps > 20: base_tax = 0.20
+        base_tax = abs(GLOBAL_CONFIG["STEP_TAX"])
+        if self.stagnant_steps > GLOBAL_CONFIG["STAGNATION"]["HIGH_PENALTY_STEP"]: base_tax = 0.20
         b_breakdown["tax"] -= base_tax
 
-        # Screen Progress Bounty: Tiny dopamine hit (+0.05) for any action that physically changes the game screen.
+        # Screen Progress Bounty: Tiny dopamine hit for any action that physically changes the game screen.
         if new_screen != self.last_prog_screen:
-            b_breakdown["tax"] += 0.05
+            b_breakdown["tax"] += abs(GLOBAL_CONFIG["STEP_TAX"])
 
         if self.combat_turn_count > 20: b_breakdown["tax"] -= (self.combat_turn_count - 20) * 0.1
         
         # Aggressive Stagnation Tax: Rapidly breaks menu loops.
-        if self.stagnant_steps > 50: b_breakdown["tax"] -= 20.0
-        elif self.stagnant_steps > 20: b_breakdown["tax"] -= 10.0 # Heavy penalty for persistent loops
-        elif self.stagnant_steps > 10: b_breakdown["tax"] -= 2.0  # Early loop-break trigger
+        if self.stagnant_steps > GLOBAL_CONFIG["STAGNATION"]["CRITICAL_STEP"]: b_breakdown["tax"] -= 20.0
+        elif self.stagnant_steps > GLOBAL_CONFIG["STAGNATION"]["HIGH_PENALTY_STEP"]: b_breakdown["tax"] -= 10.0 
+        elif self.stagnant_steps > GLOBAL_CONFIG["STAGNATION"]["LOW_PENALTY_STEP"]: b_breakdown["tax"] -= 2.0  
         if floor_now > self.previous_floor:
-            # Floor Milestone: Fixed +10 per floor climbed.
-            b_breakdown["floor"] += 10.0
+            # Floor Milestone: Fixed reward per floor climbed.
+            b_breakdown["floor"] += GLOBAL_CONFIG["BOUNTIES"]["FLOOR_CLIMB"]
             
-            # Boss Room: +50 for reaching floor 17, 33, or 48.
+            # Boss Room Sight reward
             if floor_now in [17, 33, 48]:
-                b_breakdown["bounty"] += 50.0
+                b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["BOSS_REACH"]
 
             # Completion Bounties: Triggered when exiting a room via the rewards screen.
-            if self.pending_boss_bounty: b_breakdown["bounty"] += 100.0; self.pending_boss_bounty = False
-            if self.pending_elite_bounty: b_breakdown["bounty"] += 15.0; self.pending_elite_bounty = False
+            if self.pending_boss_bounty: b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["BOSS_KILL"]; self.pending_boss_bounty = False
+            if self.pending_elite_bounty: b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["ELITE_KILL"]; self.pending_elite_bounty = False
             if self.pending_smith_bounty:
                 # Dynamic Smithing & Efficiency Calculation
-                # Higher reward if choosing to upgrade when a heal would have been wasteful.
                 potential_heal = max_hp * 0.3
                 would_overflow = (self.previous_hp + potential_heal) > (max_hp + 5)
                 
                 if would_overflow:
                     # Smart Upgrade: Rewarded for correctly skipping a wasteful heal.
                     s_m = 1.5 if hp_ratio > 0.8 else 1.2 if hp_ratio > 0.5 else 0.8
-                    b_breakdown["bounty"] += 20.0 # Extra incentive for efficiency
+                    b_breakdown["bounty"] += 20.0 # Extra efficiency incentive
                 else:
                     # Riskier Upgrade: Reward scales down or turns negative at critical HP.
                     s_m = 1.0 if hp_ratio > 0.6 else 0.5 if hp_ratio > 0.4 else -1.0 if hp_ratio > 0.25 else -3.0
                 
-                b_breakdown["bounty"] += (15.0 * s_m); self.pending_smith_bounty = False
+                b_breakdown["bounty"] += (GLOBAL_CONFIG["BOUNTIES"]["SMITH_BASE"] * s_m); self.pending_smith_bounty = False
             
-            # Drafting Incentive: +2.0 for adding cards during Act 1 (Floors 1-15).
+            # Drafting Incentive: reward for adding cards during Act 1 (Floors 1-15).
             if len(player_now.get("deck", [])) > self.last_prog_deck_size and floor_now < 16 and self.last_prog_deck_size > 0:
-                b_breakdown["bounty"] += 2.0
+                b_breakdown["bounty"] += GLOBAL_CONFIG["BOUNTIES"]["DRAFT_CARD"]
             
             self.previous_floor = floor_now
             
