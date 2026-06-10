@@ -1,4 +1,5 @@
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import glob
 import time
 import datetime
@@ -20,7 +21,6 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.logger import configure
 import sys
 
-# TeeLogger: High-performance log utility that mirrors console output to disk
 class TeeLogger:
     def __init__(self, filename, mode="a", max_mb=50):
         self.filename = filename
@@ -69,16 +69,9 @@ HOF_DIR = os.path.join(MODEL_DIR, "hall_of_fame")
 
 SESSION_ID = int(time.time())
 
-# Training ports for the 3-node learning cluster
 TRAIN_PORTS = [15526, 15527, 15528]
-# Port for the deterministic evaluation node
 EVAL_PORT = 15529
 
-# Training Curriculum Stages: (Batch Size, n_steps per Node, Max Steps)
-# The Grandmaster Curriculum uses high-saturation buffers to maximize strategic learning.
-# Stage 1 (Warmup): 1024 steps * 3 nodes = 3072 total buffer. (8 updates over 24,576 steps).
-# Stage 2 (Mastery): 4096 steps * 3 nodes = 12,288 total buffer. (Master Cycle).
-# Batch Alignment: 3072 batch size fits perfectly into both buffer stages.
 BUFFER_STAGES = [
     (3072, 1024, 24_576), 
     (3072, 4096, 100_000_000)
@@ -86,16 +79,19 @@ BUFFER_STAGES = [
 
 PERF_STATE_FILE = os.path.join(LOG_DIR, "all_time_perf.json")
 
-# SynergyCNNExtractor: 4-branch 1D-Convolutional framework for total combat awareness.
-# This extractor processes Enemies, Hand, Draw Pile, and Discard Pile in parallel.
-# It enables the model to detect spatial synergies and strategic windows (AOE, Patient Power).
 class SynergyCNNExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.Space):
-        # features_dim=2048 provides a wide bottleneck for the [1024, 1024, 512] policy network.
         super().__init__(observation_space, features_dim=2048)
         
-        # Combat Intelligence Branch: Processes 5 enemies with 40 features each.
         self.enemy_cnn = nn.Sequential(
+            nn.Conv1d(in_channels=36, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Flatten()
+        )
+
+        self.hand_cnn = nn.Sequential(
             nn.Conv1d(in_channels=40, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
@@ -103,17 +99,8 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
             nn.Flatten()
         )
 
-        # Triple-Eye Deck Branches: Hand, Draw, and Discard piles (10 cards each).
-        self.hand_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Flatten()
-        )
-
         self.draw_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
+            nn.Conv1d(in_channels=40, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -121,43 +108,30 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
         )
 
         self.discard_cnn = nn.Sequential(
-            nn.Conv1d(in_channels=30, out_channels=64, kernel_size=3, padding=1),
+            nn.Conv1d(in_channels=40, out_channels=64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Flatten()
         )
         
-        # Metadata Processor: Handles character stats, relics, map, and specialized states.
-        # Total non-CNN floats: 120 (Meta) + 150 (Relics) + 166 (Env) + 164 (Exhaust) + 100 (Sphere) + 200 (Pets) + 560 (Map) = 1460
-        self.meta_processor = nn.Sequential(nn.Linear(1460, 512), nn.ReLU())
-        
-        # Final Integration Layer: Merges all 5 intelligence branches into the 2048-dim feature vector.
-        # CNN Out: (128*5) + (128*10) + (128*10) + (128*10) = 640 + 1280 + 1280 + 1280 = 4480
-        # Wait, Flatten() of Conv1d(Batch, 128, 5) is 640. Flatten of Conv1d(Batch, 128, 10) is 1280.
-        self.final_dense = nn.Sequential(nn.Linear(640 + 1280 + 1280 + 1280 + 512, 2048), nn.ReLU())
+        self.meta_processor = nn.Sequential(nn.Linear(2116, 512), nn.ReLU())
+        self.final_dense = nn.Sequential(nn.Linear(6912, 2048), nn.ReLU())
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
-        # Surgical Slicing of the 2560-float Grandmaster Vector.
-        meta_1 = observations[:, :120]         # Meta
-        enemy_flat = observations[:, 120:320]   # Enemies (5 slots * 40)
-        hand_flat = observations[:, 320:620]    # Hand (10 slots * 30)
-        draw_flat = observations[:, 620:920]    # Draw (10 slots * 30)
-        disc_flat = observations[:, 920:1220]   # Discard (10 slots * 30)
-        relics = observations[:, 1220:1370]     # Relics
-        env_meta = observations[:, 1370:1536]   # Overlays
-        exhaust = observations[:, 1536:1700]    # Exhaust
-        sphere = observations[:, 1700:1800]     # Sphere
-        pets = observations[:, 1800:2000]       # Pets
-        map_meta = observations[:, 2000:]       # Map
-
-        metadata = th.cat([meta_1, relics, env_meta, exhaust, sphere, pets, map_meta], dim=1)
+        meta_1 = observations[:, :120]               
+        enemy_flat = observations[:, 120:300]        
+        hand_flat = observations[:, 300:900]         
+        draw_flat = observations[:, 900:1500]        
+        disc_flat = observations[:, 1500:2100]       
+        map_meta = observations[:, 2100:]            
         
-        # Spatial Reshaping for CNN Input: (Batch, Channels, Length)
-        enemy_spatial = enemy_flat.view(-1, 5, 40).transpose(1, 2)
-        hand_spatial = hand_flat.view(-1, 10, 30).transpose(1, 2)
-        draw_spatial = draw_flat.view(-1, 10, 30).transpose(1, 2)
-        disc_spatial = disc_flat.view(-1, 10, 30).transpose(1, 2)
+        metadata = th.cat([meta_1, map_meta], dim=1) 
+        
+        enemy_spatial = enemy_flat.view(-1, 5, 36).transpose(1, 2)
+        hand_spatial = hand_flat.view(-1, 15, 40).transpose(1, 2)
+        draw_spatial = draw_flat.view(-1, 15, 40).transpose(1, 2)
+        disc_spatial = disc_flat.view(-1, 15, 40).transpose(1, 2)
         
         return self.final_dense(th.cat([
             self.enemy_cnn(enemy_spatial), 
@@ -167,7 +141,6 @@ class SynergyCNNExtractor(BaseFeaturesExtractor):
             self.meta_processor(metadata)
         ], dim=1))
 
-# Manages Hall of Fame models and all-time best scoring
 class GlobalPerformanceTracker:
     def __init__(self):
         self.best_reward, self.best_floor, self.hof_entries = -1000.0, 0, []
@@ -204,7 +177,6 @@ class GlobalPerformanceTracker:
         except: pass
 
 def synchronize_logs(current_step, checkpoint_path=None):
-    """Merges fragmented session logs and truncates 'ghost steps' for 100% telemetry accuracy."""
     print(f"[INTEGRITY] Synchronizing logs with current brain step: {current_step:,}...")
     
     tech_log_dir = os.path.join(LOG_DIR, "sb3_tech")
@@ -307,7 +279,6 @@ def synchronize_logs(current_step, checkpoint_path=None):
             if cleaned_count > 0: status += f" and cleaned {cleaned_count} ghost runs"
             print(f"  > Port {port}: {status}. Master log established.")
 
-# Custom metrics collection for Tensorboard
 class TensorboardMetricsCallback(BaseCallback):
     def __init__(self, tracker, verbose=0):
         super().__init__(verbose)
@@ -358,7 +329,6 @@ class TensorboardMetricsCallback(BaseCallback):
                 print(f"[{timestamp}] RUN #{self.episode_count} | Floor: {floor} | Rew: {reward:.1f} (Best: {self.tracker.best_floor})")
         return True
 
-# High-detail progress bar with live telemetry
 class CustomProgressBarCallback(BaseCallback):
     def __init__(self, total_timesteps, phase_manager, tracker, verbose=0):
         super().__init__(verbose)
@@ -374,15 +344,14 @@ class CustomProgressBarCallback(BaseCallback):
     def _on_training_end(self) -> None:
         if self.pbar: self.pbar.close()
 
-# The Phase Manager: Orchestrates the curriculum and manages the Smart Entropy Defibrillator
 class PhaseManagerCallback(BaseCallback):
-    def __init__(self, eval_env, eval_freq_global, tracker, n_eval_episodes=10, state_file=None, verbose=1):
+    def __init__(self, eval_env, eval_freq_global, tracker, n_eval_episodes=20, state_file=None, verbose=1):
         super().__init__(verbose)
         self.eval_env, self.eval_freq_global, self.tracker, self.n_eval_episodes = eval_env, eval_freq_global, tracker, n_eval_episodes
         self.state_file = state_file or os.path.join(CHECKPOINT_DIR, "cluster_state.json")
         self.phase_idx, self.last_eval_step, self.best_mean_reward = 1, 0, -1000.0
         self.consecutive_failures = 0 
-        self.current_ent_coef = 0.10 # Master Class baseline curiosity (Phases 1-3)
+        self.current_ent_coef = 0.10
         self._load_state()
     def set_eval_freq(self, new_freq):
         self.eval_freq_global = new_freq
@@ -414,28 +383,24 @@ class PhaseManagerCallback(BaseCallback):
         except: pass
 
     def _apply_phase(self, reset_entropy=False):
-        """Synchronizes curriculum parameters (LR, Entropy) across the cluster."""
         self.training_env.env_method("set_training_phase", self.phase_idx)
         self.eval_env.env_method("set_training_phase", self.phase_idx)
         
-        # Phase-specific Learning Rates: Higher for discovery, lower for fine-tuning.
         lr = {1: 1e-4, 2: 1e-4, 3: 1e-4, 4: 5e-5, 5: 5e-5}.get(self.phase_idx, 5e-5)
         self.model.learning_rate = lr
         
         if reset_entropy or (self.phase_idx <= 3 and self.current_ent_coef < 0.10):
-            # Baseline curiosity for starting a new Act or recovering Phase 1-3 baseline.
             self.current_ent_coef = 0.10
             
         self.model.ent_coef = self.current_ent_coef
         print(f"[CURRICULUM] Phase {self.phase_idx} active. LR: {lr} | Ent: {self.current_ent_coef:.4f}")
 
     def _run_exam(self):
-        """Executes a 10-episode deterministic mastery test on the evaluation node."""
         current_step = self.model.num_timesteps
         self.last_eval_step = (current_step // self.eval_freq_global) * self.eval_freq_global
         self.save_state()
         
-        # Periodic brain checkpoints
+        # [STEP 1 & 2: UPDATE AND SAVE BRAIN]
         model_path = os.path.join(CHECKPOINT_DIR, f"sts2_mid_run_step_{current_step}.zip")
         vec_path = model_path.replace(".zip", ".pkl")
         self.model.save(model_path)
@@ -443,7 +408,6 @@ class PhaseManagerCallback(BaseCallback):
         if norm_env: norm_env.save(vec_path)
         print(f"[CHECKPOINT] Updated Brain Secured at Step {current_step:,}")
         
-        # Storage cleanup: maintain only the most recent checkpoints
         all_zips = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "sts2_mid_run_step_*.zip")), key=os.path.getmtime)
         while len(all_zips) > 3:
             oldest_zip = all_zips.pop(0)
@@ -453,6 +417,7 @@ class PhaseManagerCallback(BaseCallback):
                 if os.path.exists(oldest_vec): os.remove(oldest_vec)
             except: pass
         
+        # [STEP 3: EVALUATE LATEST SAVED BRAIN]
         print(f"\n{'='*60}")
         print(f"[EXAM] MILESTONE REACHED: {current_step:,} steps")
         print(f"[EXAM] Starting Deterministic Skills Test on Port {EVAL_PORT}...")
@@ -487,7 +452,6 @@ class PhaseManagerCallback(BaseCallback):
         mean_len = np.mean(total_lengths)
         consistency = np.std(total_floors)
         
-        # Graduation Requirements: Hardcore Mastery Targets for Ascension 0 Readiness
         promo_reward_targets = {4: 900.0, 5: 1000.0, 6: 1100.0}
         exam_win_floors = {1: 17, 2: 33, 3: 48, 4: 48, 5: 48, 6: 48}
         
@@ -497,7 +461,6 @@ class PhaseManagerCallback(BaseCallback):
         print(f"\n[EXAM] Mean Reward: {mean_reward_final:.2f} | Mean Floor: {mean_floor:.1f}")
         print(f"[EXAM] Successes: {wins}/{self.n_eval_episodes} hit target Floor {target_win_floor}")
         
-        # Exam performance persistence
         latest_stats_path = os.path.join(LOG_DIR, f"latest_exam_stats_step_{current_step}.txt")
         with open(latest_stats_path, "w") as f:
             f.write(f"{'='*40}\n")
@@ -505,11 +468,11 @@ class PhaseManagerCallback(BaseCallback):
             f.write(f"{'='*40}\n")
             f.write(f"Phase: {self.phase_idx}\n")
             f.write(f"Total Training Steps: {current_step}\n\n")
-            f.write(f"--- FLOOR METRICS (10-Game Exam) ---\n")
+            f.write(f"--- FLOOR METRICS ({self.n_eval_episodes}-Game Exam) ---\n")
             f.write(f"Mean Floor Reached: {mean_floor:.1f}\n")
             f.write(f"Best Floor Reached: {best_floor}\n")
             f.write(f"Worst Floor Reached: {worst_floor}\n\n")
-            f.write(f"--- REWARD METRICS (10-Game Exam) ---\n")
+            f.write(f"--- REWARD METRICS ({self.n_eval_episodes}-Game Exam) ---\n")
             f.write(f"Mean Score: {mean_reward_final:.2f}\n")
             f.write(f"Highest Score: {np.max(total_rewards):.2f}\n")
             f.write(f"Lowest Score: {np.min(total_rewards):.2f}\n")
@@ -520,7 +483,6 @@ class PhaseManagerCallback(BaseCallback):
             try: os.remove(all_latest.pop(0))
             except: pass
 
-        # Detailed Best-of-all-time stats
         best_bio_path = os.path.join(LOG_DIR, "best_model_details.json")
         with open(best_bio_path, "w") as bio_f:
             json.dump({
@@ -538,7 +500,6 @@ class PhaseManagerCallback(BaseCallback):
                 "success_rate": f"{wins}/{self.n_eval_episodes}"
             }, bio_f, indent=4)
 
-        # Progression History CSV
         prog_log_path = os.path.join(LOG_DIR, "exam_progression_log.csv")
         prog_data = {
             "step": [current_step],
@@ -554,7 +515,6 @@ class PhaseManagerCallback(BaseCallback):
         else:
             df_new.to_csv(prog_log_path, mode='a', header=False, index=False)
 
-        # Gallery Management: maintain Top-3 best ever deterministic brains
         top_log_path = os.path.join(TOP_MODELS_DIR, "top_models_log.json")
         top_entries = []
         if os.path.exists(top_log_path):
@@ -600,7 +560,6 @@ class PhaseManagerCallback(BaseCallback):
                         f.write(f"Run {i+1}: Floor {f_val} | Reward {r:.1f}\n")
                     f.write(f"{'='*40}\n")
 
-                # Clear outdated models of the same rank
                 for f in glob.glob(os.path.join(TOP_MODELS_DIR, f"*_rank_{rank}_*")):
                     if entry["id"] not in f:
                         try: os.remove(f)
@@ -610,13 +569,11 @@ class PhaseManagerCallback(BaseCallback):
             self.best_mean_reward = mean_reward_final
             print(f"[EXAM] Phase Personal Best broken! New Target: {mean_reward_final:.2f}")
 
-        # Curriculum Controls: Promotion / Defibrillation / Demotion
+        # [STEP 4: TRANSITION / PROMOTE / DEMOTE]
         is_promoted = False
         if self.phase_idx <= 3:
-            # Phases 1-3: Experience First. Promote purely on reach-rate (wins >= 3).
-            if wins >= 3: is_promoted = True
+            if wins >= 6: is_promoted = True
         else:
-            # Phases 4-6: Mastery. Promote on BOTH high reward and reaching floor 48.
             if mean_reward_final >= promo_reward_targets.get(self.phase_idx, 9999) and mean_floor >= 48.0:
                 is_promoted = True
 
@@ -624,7 +581,6 @@ class PhaseManagerCallback(BaseCallback):
             if self.phase_idx < 6:
                 print(f"\n[PROMOTION] CONGRATULATIONS! Target reached for Phase {self.phase_idx}.")
                 
-                # Definitive Save for Phase 3 Graduation: Locked brain for archival safety
                 base_name = f"ultimate_best_phase_{self.phase_idx}"
                 if self.phase_idx == 3: base_name += "_GRADUATE"
                 
@@ -644,11 +600,10 @@ class PhaseManagerCallback(BaseCallback):
             else:
                 print(f"\n[MAXED] Training complete. Phase 6 Mastery Achieved.")
         else:
-            if wins == 0:
+            if wins < 6:
                 self.consecutive_failures += 1
                 print(f"[STAGNATION] Strike {self.consecutive_failures}/5. Failed to hit doorstep (Floor {target_win_floor}).")
                 
-                # Entropy Defibrillator: Increases ent_coef by +0.05 after 5 failed exams.
                 if self.consecutive_failures >= 5:
                     old_ent = self.current_ent_coef
                     self.current_ent_coef = min(0.25, self.current_ent_coef + 0.05)
@@ -656,8 +611,6 @@ class PhaseManagerCallback(BaseCallback):
                     print(f"[DEFIBRILLATOR] Stagnation detected. Boosting Curiosity: {old_ent:.4f} -> {self.current_ent_coef:.4f}")
                     self._apply_phase(reset_entropy=False)
                 
-                # Step-Down: Drop exactly 1 Phase if failed 20 times.
-                # HARDCORE MANDATE: No demotions allowed once Phase 4 (Mastery) is reached.
                 total_strikes = getattr(self, 'total_strikes', 0) + 1
                 self.total_strikes = total_strikes
                 if total_strikes >= 20 and self.phase_idx > 1 and self.phase_idx < 4:
@@ -668,7 +621,6 @@ class PhaseManagerCallback(BaseCallback):
                     self.best_mean_reward = promo_reward_targets.get(self.phase_idx, 0.0) - 25.0 
                     self._apply_phase(reset_entropy=True)
             else:
-                # Entropy Decay: Progress confirmed; reduce curiosity by 0.90x per cycle.
                 if self.current_ent_coef > 0.01:
                     self.current_ent_coef *= 0.90
                     print(f"[REFINEMENT] Progress confirmed. Decaying curiosity: {self.current_ent_coef:.4f}")
@@ -687,7 +639,6 @@ class PhaseManagerCallback(BaseCallback):
         return True
 
 def get_newest_model_and_vec():
-    """Recursively finds the absolute newest .zip and matching .pkl to resume training."""
     all_zips = []
     for root, _, files in os.walk(MODEL_DIR):
         for f in files:
@@ -717,12 +668,6 @@ def get_newest_model_and_vec():
     return latest_model, None
 
 def create_fresh_model(env, n_steps, batch_size, weights_path=None):
-    """
-    Initializes or resumes the MaskablePPO model with the Grandmaster Architecture.
-    Standard: 2560-float observation space and 1024-wide neural policy.
-    """
-    # The Grandmaster Architecture uses a 2048-dim feature extractor and 1024-wide layers.
-    # This configuration is optimized for high-fidelity strategic deep learning.
     policy_kwargs = dict(
         features_extractor_class=SynergyCNNExtractor, 
         net_arch=dict(pi=[1024, 1024, 512], vf=[1024, 1024, 512])
@@ -734,25 +679,24 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
         "verbose": 1, 
         "tensorboard_log": "./tensorboard/",
         "device": "auto", 
-        "learning_rate": 1e-4, # Standard learning rate for discovery phase
+        "learning_rate": 1e-4,
         "n_steps": n_steps, 
         "batch_size": batch_size,
         "n_epochs": 10, 
         "gamma": 0.999, 
         "gae_lambda": 0.98, 
         "clip_range": 0.2, 
-        "ent_coef": 0.10, # Initial baseline curiosity for for the fresh start
+        "ent_coef": 0.10, 
         "vf_coef": 0.7, 
         "policy_kwargs": policy_kwargs
     }
     
     if weights_path and os.path.exists(weights_path):
         try:
-            print(f"[LOAD] Restoring Grandmaster state from {weights_path}...")
+            print(f"[LOAD] Restoring model state from {weights_path}...")
             model = MaskablePPO.load(weights_path, env=env, n_steps=n_steps, batch_size=batch_size)
             return model
         except Exception as e:
-            # Fallback for parameter-compatible partial loads (e.g., Transfer Learning)
             print(f"[LOAD] Performing Transfer Learning load from {weights_path}...")
             new_model = MaskablePPO(**model_params)
             old = MaskablePPO.load(weights_path)
@@ -763,18 +707,15 @@ def create_fresh_model(env, n_steps, batch_size, weights_path=None):
     return MaskablePPO(**model_params)
 
 def make_env(port, is_eval=False):
-    """Factory function for initializing isolated game environments for the SubprocVecEnv."""
     def _init():
         node_id = {15526: 1, 15527: 2, 15528: 3, 15529: 4}.get(port, 1)
         data_dir = f"Node{node_id}_Data"
-        # The SlayTheSpire2Env now handles centralized path derivation from its GLOBAL_CONFIG.
         base_env = SlayTheSpire2Env(port=port, user_data_dir=data_dir, force_fresh=False, is_eval=is_eval)
         env = ActionMasker(base_env, lambda e: e.action_masks())
         return Monitor(env, os.path.join(LOG_DIR, f"monitor_{port}_{SESSION_ID}.csv"), info_keywords=("floor",))
     return _init
 
 def setup_vec_env(ports, vec_path=None, is_eval=False):
-    """Wraps environments into vectorized sub-processes for high-performance synchronous training."""
     vec_env = SubprocVecEnv([make_env(p, is_eval) for p in ports], start_method="spawn") if not is_eval else DummyVecEnv([make_env(p, is_eval) for p in ports])
     if vec_path and os.path.exists(vec_path):
         env = VecNormalize.load(vec_path, vec_env)
@@ -786,7 +727,6 @@ def setup_vec_env(ports, vec_path=None, is_eval=False):
     return env
 
 def main():
-    """Master entry point for the training orchestrator."""
     for d in [CHECKPOINT_DIR, MODEL_DIR, LOG_DIR, ULTIMATE_BEST_DIR, HOF_DIR, TOP_MODELS_DIR]: os.makedirs(d, exist_ok=True)
 
     console_log_path = os.path.join(LOG_DIR, "train_console.log")
@@ -824,15 +764,13 @@ def main():
     model = None
     try:
         for batch_size, n_steps, stage_end in BUFFER_STAGES:
-            # The Evaluation Frequency is locked to the rollout cycle (n_steps * 3 nodes).
             eval_freq_global = n_steps * len(TRAIN_PORTS) 
             
-            # Stage 1 (Warmup): No exams are triggered during the discovery phase.
-            # We set eval_freq_global to exceed stage_end to ensure discovery only.
             if stage_end == 24_576: 
-                eval_freq_global = stage_end + 1
+                # Execute the warmup stage evaluation directly before the Stage 2 handoff
+                eval_freq_global = 24_576 
             
-            phase_cb = PhaseManagerCallback(eval_env, eval_freq_global, tracker, n_eval_episodes=10)
+            phase_cb = PhaseManagerCallback(eval_env, eval_freq_global, tracker, n_eval_episodes=20)
             
             if model is None: 
                 model = create_fresh_model(train_env, start_n_steps, start_batch_size, current_model_file)
@@ -842,7 +780,6 @@ def main():
             if model.num_timesteps >= stage_end: 
                 continue
 
-            # Stage Handoff: Handle transitions between Batch/Buffer sizes
             if model.n_steps != n_steps:
                 tmp_path = os.path.join(CHECKPOINT_DIR, "transition_temp.zip")
                 tmp_vec = os.path.join(CHECKPOINT_DIR, "transition_temp.pkl")
@@ -865,6 +802,7 @@ def main():
                 reset_num_timesteps=False,
                 progress_bar=True
             )
+            # Guarantee the evaluation is triggered before rolling into the Stage 2 transition loop
             if model.num_timesteps >= phase_cb.last_eval_step + phase_cb.eval_freq_global:
                 phase_cb._run_exam()
     except (KeyboardInterrupt, Exception) as e:
